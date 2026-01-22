@@ -1,0 +1,13 @@
+websocket-client[optional]
+pyyaml
+telethon
+python_socks
+async_timeout
+coloredlogs
+websockets
+aiohttp[speedups]==3.8.6
+ffmpy3
+# 直链功能依赖
+pyrogram<=2.0.93
+TgCrypto<=1.2.5
+python-dotenv<=0.20.0

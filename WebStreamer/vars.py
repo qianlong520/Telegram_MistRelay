@@ -1,0 +1,43 @@
+# This file is a part of TG-FileStreamBot
+# Coding : Jyothis Jayanth [@EverythingSuckz]
+
+import sys
+from configer import (
+    API_ID, API_HASH, BOT_TOKEN,
+    STREAM_PORT, STREAM_BIND_ADDRESS, STREAM_HASH_LENGTH,
+    STREAM_HAS_SSL, STREAM_NO_PORT, STREAM_FQDN,
+    STREAM_KEEP_ALIVE, STREAM_PING_INTERVAL, STREAM_USE_SESSION_FILE,
+    STREAM_ALLOWED_USERS, BIN_CHANNEL, ENABLE_STREAM, STREAM_AUTO_DOWNLOAD,
+    SEND_STREAM_LINK, ADMIN_ID
+)
+
+
+class Var(object):
+    MULTI_CLIENT = False
+    API_ID = API_ID
+    API_HASH = API_HASH
+    BOT_TOKEN = BOT_TOKEN
+    SLEEP_THRESHOLD = 60  # 1 minute
+    WORKERS = 6  # 6 workers = 6 commands at once
+    BIN_CHANNEL = int(BIN_CHANNEL) if BIN_CHANNEL and str(BIN_CHANNEL).strip() else None
+    PORT = STREAM_PORT if STREAM_PORT else 8080
+    BIND_ADDRESS = STREAM_BIND_ADDRESS if STREAM_BIND_ADDRESS else "0.0.0.0"
+    PING_INTERVAL = STREAM_PING_INTERVAL if STREAM_PING_INTERVAL else 1200  # 20 minutes
+    HAS_SSL = STREAM_HAS_SSL if STREAM_HAS_SSL else False
+    NO_PORT = STREAM_NO_PORT if STREAM_NO_PORT else False
+    HASH_LENGTH = STREAM_HASH_LENGTH if STREAM_HASH_LENGTH else 6
+    if not 5 < HASH_LENGTH < 64:
+        sys.exit("Hash length should be greater than 5 and less than 64")
+    FQDN = str(STREAM_FQDN if STREAM_FQDN else BIND_ADDRESS)
+    URL = "http{}://{}{}/".format(
+            "s" if HAS_SSL else "", FQDN, "" if NO_PORT else ":" + str(PORT)
+        )
+    KEEP_ALIVE = STREAM_KEEP_ALIVE if STREAM_KEEP_ALIVE else False
+    DEBUG = False
+    USE_SESSION_FILE = STREAM_USE_SESSION_FILE if STREAM_USE_SESSION_FILE else False
+    ALLOWED_USERS = [x.strip("@ ") for x in str(STREAM_ALLOWED_USERS or "").split(",") if x.strip("@ ")] if STREAM_ALLOWED_USERS else []
+    ENABLE_STREAM = ENABLE_STREAM if ENABLE_STREAM else False
+    AUTO_DOWNLOAD = STREAM_AUTO_DOWNLOAD if STREAM_AUTO_DOWNLOAD else True
+    SEND_STREAM_LINK = SEND_STREAM_LINK if SEND_STREAM_LINK else False
+    ADMIN_ID = ADMIN_ID
+

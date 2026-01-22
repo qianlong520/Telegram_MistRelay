@@ -1,0 +1,16 @@
+services:
+  mistrelay:
+    build: .
+    container_name: mistrelay
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./db:/app/db
+      - ./downloads:/root/downloads  # 下载目录（可根据需要修改）
+      - ./rclone:/root/.config/rclone  # rclone配置目录
+    environment:
+      - TZ=Asia/Shanghai
+    # 如果需要直链功能，需要映射Web服务器端口（默认8080）
+    # 如果使用network_mode: host，则不需要ports映射
+    # ports:
+    #   - "8080:8080"  # 直链Web服务器端口（如果启用直链功能）
