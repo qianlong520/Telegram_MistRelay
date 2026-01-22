@@ -31,7 +31,15 @@ git clone https://github.com/qianlong520/Telegram_MistRelay.git
 cd Telegram_MistRelay
 ```
 
-重命名 `db/config.example.yml` 为 `config.yml` 并设置参数：
+复制示例配置文件并设置参数：
+
+```bash
+# 复制配置文件示例
+cp db/config.example.yml db/config.yml
+cp rclone/rclone.conf.example rclone/rclone.conf
+```
+
+然后编辑 `db/config.yml` 文件，填入您的配置信息：
 
 ```yaml
 # Telegram API 配置
