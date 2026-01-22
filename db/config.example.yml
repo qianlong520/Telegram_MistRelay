@@ -1,0 +1,61 @@
+#Telegram Bot配置
+API_ID: xxxxxx                      # Telegram API ID (从 https://my.telegram.org 获取)
+API_HASH: xxxxxxxxxxxxxxxxxxxxxxxx  # Telegram API Hash (从 https://my.telegram.org 获取)
+BOT_TOKEN: xxxxxx:xxxxxxxxxxxx      # Telegram Bot Token (从 @BotFather 获取)
+
+#Telegram 管理员 ID
+ADMIN_ID: xxxxxxxxx                 # 管理员的Telegram ID (数字)
+FORWARD_ID:                         # 可选，文件转发目标ID
+
+#默认是否上传到电报 true 或者 false
+UP_TELEGRAM: false
+#是否启用rclone上传到OneDrive
+UP_ONEDRIVE: true
+
+#rclone配置
+RCLONE_REMOTE: onedrive             # rclone配置的远程名称
+RCLONE_PATH: /Downloads             # OneDrive上的目标路径
+#是否在成功上传到OneDrive后自动删除本地文件
+AUTO_DELETE_AFTER_UPLOAD: true
+#下载保存路径
+SAVE_PATH: ./downloads
+
+#代理ip 不需要则留空
+PROXY_IP:
+PROXY_PORT:
+
+# aria2c RPC配置
+RPC_SECRET: xxxxxxx                 # RPC密钥（建议修改为自定义强密码）
+RPC_URL: localhost:6800/jsonrpc     # 使用Docker部署时必须使用localhost或127.0.0.1
+
+# 直链功能配置（默认启用，作为TG媒体文件下载的前置功能）
+# 是否启用直链功能
+ENABLE_STREAM: true
+# 日志频道ID（用于存储转发文件，启用直链功能时必须配置）
+# 创建一个公开频道，将机器人添加为管理员，然后获取频道ID
+BIN_CHANNEL: -100xxxxxxxxxx        # 频道ID（必须以 -100 开头）
+# Web服务器端口
+STREAM_PORT: 8080
+# Web服务器绑定地址
+STREAM_BIND_ADDRESS: 0.0.0.0
+# 哈希长度（5-64之间）
+STREAM_HASH_LENGTH: 6
+# 是否使用SSL
+STREAM_HAS_SSL: false
+# 是否隐藏端口（需要端口为80或443）
+STREAM_NO_PORT: false
+# 完全限定域名（FQDN）
+STREAM_FQDN: your-domain.com        # 您的域名
+# 是否保持连接活跃（用于免费PaaS）
+STREAM_KEEP_ALIVE: false
+# Ping间隔（秒）
+STREAM_PING_INTERVAL: 1200
+# 是否使用会话文件
+STREAM_USE_SESSION_FILE: false
+# 允许使用直链的用户列表（用逗号分隔，留空则允许所有人）
+STREAM_ALLOWED_USERS: 
+# 是否自动将直链添加到aria2下载队列（默认启用，仅管理员）
+STREAM_AUTO_DOWNLOAD: true
+# 是否发送直链信息给用户（默认不启用，设置为 true 后才会发送直链信息给用户，关闭后仍会生成直链并添加到下载队列）
+SEND_STREAM_LINK: false
+

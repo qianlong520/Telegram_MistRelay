@@ -36,6 +36,10 @@ env/
 db/config.yml
 rclone/rclone.conf
 
+# 示例配置文件（这些文件应该被提交）
+!db/config.example.yml
+!rclone/rclone.conf.example
+
 # Logs
 *.log
 logs/

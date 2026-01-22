@@ -1,0 +1,28 @@
+# rclone 配置文件示例
+# 
+# 使用说明：
+# 1. 在本地电脑上安装 rclone
+# 2. 运行命令：rclone config
+# 3. 按照提示配置 OneDrive
+# 4. 配置完成后，将生成的配置文件复制到此目录，并重命名为 rclone.conf
+#
+# 配置文件位置：
+# - Windows: %USERPROFILE%\.config\rclone\rclone.conf
+# - macOS/Linux: ~/.config/rclone/rclone.conf
+#
+# 注意：配置文件包含敏感的访问令牌，请妥善保管，不要分享给他人！
+
+[onedrive]
+type = onedrive
+token = {"access_token":"YOUR_ACCESS_TOKEN_HERE","token_type":"Bearer","refresh_token":"YOUR_REFRESH_TOKEN_HERE","expiry":"2026-01-01T00:00:00.000000000+08:00","expires_in":3599}
+drive_id = YOUR_DRIVE_ID_HERE
+drive_type = personal
+
+# 配置步骤：
+# 1. 在本地运行：rclone config
+# 2. 选择 "n" 创建新远程
+# 3. 选择 "onedrive" 类型
+# 4. 按照提示完成 OAuth 认证（会打开浏览器）
+# 5. 选择 drive type（通常选择 "personal"）
+# 6. 配置完成后，将配置文件复制到项目的 rclone 目录
+
