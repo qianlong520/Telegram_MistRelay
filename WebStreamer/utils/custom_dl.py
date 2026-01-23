@@ -2,8 +2,8 @@ import math
 import asyncio
 import logging
 from WebStreamer import Var
-from typing import Dict, Union
-from WebStreamer.bot import work_loads
+from typing import Dict, Union, Optional
+from WebStreamer.bot import work_loads, multi_clients, channel_accessible_clients
 from pyrogram import Client, utils, raw
 from .file_properties import get_file_ids
 from pyrogram.session import Session, Auth
@@ -15,6 +15,37 @@ logger = logging.getLogger("streamer")
 
 # 用于同步授权导出的锁字典（按DC ID）
 export_auth_locks: Dict[int, asyncio.Lock] = {}
+
+def get_next_available_client(current_index: int, exclude_indices: Optional[set] = None) -> Optional[int]:
+    """
+    获取下一个可用的客户端索引
+    优先选择能访问频道的客户端，排除当前客户端和已失败的客户端
+    """
+    if exclude_indices is None:
+        exclude_indices = set()
+    exclude_indices.add(current_index)
+    
+    # 优先选择能访问频道的客户端
+    if channel_accessible_clients:
+        available_loads = {
+            k: v for k, v in work_loads.items()
+            if k in channel_accessible_clients 
+            and k in multi_clients
+            and k not in exclude_indices
+        }
+        if available_loads:
+            return min(available_loads, key=available_loads.get)
+    
+    # 回退到所有可用客户端
+    valid_loads = {
+        k: v for k, v in work_loads.items()
+        if k in multi_clients
+        and k not in exclude_indices
+    }
+    if valid_loads:
+        return min(valid_loads, key=valid_loads.get)
+    
+    return None
 
 class ByteStreamer:
     def __init__(self, client: Client):
@@ -231,6 +262,83 @@ class ByteStreamer:
             )
         return location
 
+    async def _try_get_file_chunk(
+        self,
+        client: Client,
+        file_id: FileId,
+        location,
+        offset: int,
+        chunk_size: int,
+        max_retries: int = 3
+    ):
+        """
+        尝试获取文件块，支持重试和客户端切换
+        返回: (success: bool, result, new_client, new_index)
+        """
+        for retry_attempt in range(max_retries):
+            try:
+                # 生成或获取媒体会话
+                media_session = await self.generate_media_session(client, file_id)
+                
+                # 尝试获取文件块
+                r = await media_session.invoke(
+                    raw.functions.upload.GetFile(
+                        location=location, offset=offset, limit=chunk_size
+                    ),
+                )
+                return True, r, client, None
+                
+            except (OSError, ConnectionError, TimeoutError, AuthBytesInvalid, TypeError, AttributeError) as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                
+                # 检查是否是加密相关的错误
+                is_encryption_error = (
+                    isinstance(e, TypeError) and
+                    ('Value after * must be an iterable' in error_msg or
+                     'NoneType' in error_msg or
+                     'encrypt' in error_msg.lower())
+                )
+                
+                # 检查是否是连接错误
+                is_connection_error = (
+                    isinstance(e, (OSError, ConnectionError)) or
+                    'Connection lost' in error_msg or
+                    'Connection closed' in error_msg or
+                    'Broken pipe' in error_msg
+                )
+                
+                if retry_attempt < max_retries - 1:
+                    if is_encryption_error:
+                        logger.debug(f"加密状态异常，清除会话并重试 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries})")
+                    elif is_connection_error:
+                        logger.debug(f"连接错误，尝试重新建立媒体会话 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries})")
+                    else:
+                        logger.debug(f"获取文件块失败，重试 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries}): {error_type}")
+                    
+                    # 清除无效的会话缓存（加密错误和连接错误都需要清除）
+                    if file_id.dc_id in client.media_sessions:
+                        try:
+                            await client.media_sessions[file_id.dc_id].stop()
+                        except Exception as stop_error:
+                            logger.debug(f"停止媒体会话时出错（可能已断开）: {stop_error}")
+                        del client.media_sessions[file_id.dc_id]
+                    
+                    # 等待后重试（加密错误需要稍长的等待时间）
+                    wait_time = 1.5 + retry_attempt * 0.5 if is_encryption_error else 1 + retry_attempt * 0.5
+                    await asyncio.sleep(wait_time)
+                else:
+                    # 最后一次重试失败，返回失败
+                    if is_encryption_error:
+                        logger.warning(f"加密状态异常，重试失败 (offset: {offset}): {error_type}")
+                    elif is_connection_error:
+                        logger.warning(f"连接错误，重试失败 (offset: {offset}): {error_type}")
+                    else:
+                        logger.warning(f"获取文件块失败，已达到最大重试次数 (offset: {offset}): {error_type}")
+                    return False, None, client, None
+        
+        return False, None, client, None
+
     async def yield_file(
         self,
         file_id: FileId,
@@ -243,29 +351,76 @@ class ByteStreamer:
     ) -> Union[str, None]:
         """
         Custom generator that yields the bytes of the media file.
+        支持客户端切换：当连接失败时，自动切换到其他可用客户端继续传输
         Modded from <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py#L20>
         Thanks to Eyaadh <https://github.com/eyaadh>
         """
         client = self.client
-        work_loads[index] += 1
-        logger.debug(f"Starting to yielding file with client {index}.")
+        current_index = index
+        failed_indices = set()  # 记录失败的客户端索引
         
-        try:
-            media_session = await self.generate_media_session(client, file_id)
-        except Exception as e:
-            logger.error(f"Failed to generate media session: {e}", exc_info=True)
-            work_loads[index] -= 1
+        # 确保索引存在于 work_loads 中
+        if current_index not in work_loads:
+            logger.error(f"客户端索引 {current_index} 不存在于 work_loads 中")
             return
-
+        
+        work_loads[current_index] += 1
+        logger.debug(f"Starting to yielding file with client {current_index} (当前负载: {work_loads[current_index]}).")
+        
         current_part = 1
         location = await self.get_location(file_id)
 
+        # 获取初始文件块，支持客户端切换
+        success, r, client, _ = await self._try_get_file_chunk(
+            client, file_id, location, offset, chunk_size, max_retries=3
+        )
+        
+        # 如果失败，尝试切换到其他客户端
+        if not success:
+            logger.warning(f"客户端 {current_index} 获取初始文件块失败，尝试切换到其他客户端")
+            failed_indices.add(current_index)
+            
+            # 减少当前客户端负载
+            if current_index in work_loads:
+                work_loads[current_index] -= 1
+            
+            # 尝试切换到其他客户端
+            max_client_switches = 3  # 最多尝试切换3个客户端
+            switch_success = False
+            
+            for switch_attempt in range(max_client_switches):
+                next_index = get_next_available_client(current_index, failed_indices)
+                if next_index is None:
+                    logger.error("没有其他可用的客户端")
+                    return
+                
+                logger.info(f"切换到客户端 {next_index} (尝试 {switch_attempt + 1}/{max_client_switches})")
+                current_index = next_index
+                client = multi_clients[current_index]
+                work_loads[current_index] += 1
+                
+                # 更新 ByteStreamer 的客户端引用
+                self.client = client
+                
+                # 尝试获取文件块
+                success, r, client, _ = await self._try_get_file_chunk(
+                    client, file_id, location, offset, chunk_size, max_retries=2
+                )
+                
+                if success:
+                    switch_success = True
+                    logger.info(f"成功切换到客户端 {current_index} 并获取文件块")
+                    break
+                else:
+                    failed_indices.add(current_index)
+                    if current_index in work_loads:
+                        work_loads[current_index] -= 1
+            
+            if not switch_success:
+                logger.error("所有客户端都无法获取初始文件块，停止文件流传输")
+                return
+        
         try:
-            r = await media_session.invoke(
-                raw.functions.upload.GetFile(
-                    location=location, offset=offset, limit=chunk_size
-                ),
-            )
             if isinstance(r, raw.types.upload.File):
                 while True:
                     chunk = r.bytes
@@ -286,42 +441,75 @@ class ByteStreamer:
                     if current_part > part_count:
                         break
 
-                    try:
-                        r = await media_session.invoke(
-                            raw.functions.upload.GetFile(
-                                location=location, offset=offset, limit=chunk_size
-                            ),
-                        )
-                    except (TimeoutError, AttributeError, TypeError, AuthBytesInvalid) as e:
-                        logger.warning(f"Error getting file chunk at offset {offset}: {e}")
-                        # 如果媒体会话出现问题，清除缓存并重新生成
-                        try:
-                            # 清除无效的会话缓存
-                            if file_id.dc_id in client.media_sessions:
-                                try:
-                                    await client.media_sessions[file_id.dc_id].stop()
-                                except:
-                                    pass
-                                del client.media_sessions[file_id.dc_id]
-                            # 等待一小段时间，避免立即重试
-                            await asyncio.sleep(1)
-                            # 重新生成会话
-                            media_session = await self.generate_media_session(client, file_id)
-                            r = await media_session.invoke(
-                                raw.functions.upload.GetFile(
-                                    location=location, offset=offset, limit=chunk_size
-                                ),
+                    # 尝试获取下一个文件块
+                    success, r, new_client, _ = await self._try_get_file_chunk(
+                        client, file_id, location, offset, chunk_size, max_retries=2
+                    )
+                    
+                    if not success:
+                        # 当前客户端失败，尝试切换到其他客户端
+                        logger.warning(f"客户端 {current_index} 获取文件块失败 (offset: {offset})，尝试切换到其他客户端")
+                        failed_indices.add(current_index)
+                        
+                        # 减少当前客户端负载
+                        if current_index in work_loads:
+                            work_loads[current_index] -= 1
+                        
+                        # 尝试切换到其他客户端
+                        max_client_switches = 3
+                        switch_success = False
+                        
+                        for switch_attempt in range(max_client_switches):
+                            next_index = get_next_available_client(current_index, failed_indices)
+                            if next_index is None:
+                                logger.error(f"没有其他可用的客户端 (offset: {offset})")
+                                break
+                            
+                            logger.info(f"切换到客户端 {next_index} 继续传输 (offset: {offset}, 尝试 {switch_attempt + 1}/{max_client_switches})")
+                            current_index = next_index
+                            client = multi_clients[current_index]
+                            work_loads[current_index] += 1
+                            
+                            # 更新 ByteStreamer 的客户端引用
+                            self.client = client
+                            
+                            # 尝试获取文件块
+                            success, r, client, _ = await self._try_get_file_chunk(
+                                client, file_id, location, offset, chunk_size, max_retries=2
                             )
-                        except Exception as retry_e:
-                            logger.error(f"Failed to retry getting file chunk: {retry_e}", exc_info=True)
+                            
+                            if success:
+                                switch_success = True
+                                logger.info(f"成功切换到客户端 {current_index} 并继续传输 (offset: {offset})")
+                                break
+                            else:
+                                failed_indices.add(current_index)
+                                if current_index in work_loads:
+                                    work_loads[current_index] -= 1
+                        
+                        if not switch_success:
+                            logger.error(f"所有客户端都无法获取文件块，停止文件流传输 (offset: {offset})")
                             break
-        except (TimeoutError, AttributeError, TypeError) as e:
-            logger.error(f"Error in yield_file: {e}", exc_info=True)
+        except (TimeoutError, AttributeError, TypeError, OSError, ConnectionError) as e:
+            error_msg = str(e)
+            if 'Connection lost' in error_msg or 'Connection closed' in error_msg:
+                logger.error(f"连接丢失错误 in yield_file: {e}")
+            else:
+                logger.error(f"Error in yield_file: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Unexpected error in yield_file: {e}", exc_info=True)
+            error_msg = str(e)
+            if 'Connection lost' in error_msg or 'Connection closed' in error_msg:
+                logger.error(f"连接丢失错误 in yield_file: {e}")
+            else:
+                logger.error(f"Unexpected error in yield_file: {e}", exc_info=True)
         finally:
             logger.debug(f"Finished yielding file with {current_part} parts.")
-            work_loads[index] -= 1
+            # 确保索引存在后再减少负载（使用当前使用的客户端索引）
+            if current_index in work_loads:
+                work_loads[current_index] -= 1
+                logger.debug(f"客户端 {current_index} 负载已减少 (当前负载: {work_loads[current_index]})")
+            else:
+                logger.warning(f"尝试减少客户端 {current_index} 的负载，但索引不存在于 work_loads 中")
 
     
     async def clean_cache(self) -> None:

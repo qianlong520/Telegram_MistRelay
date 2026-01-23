@@ -3,6 +3,7 @@ import base64
 import functools
 import json
 import os
+import time
 import uuid
 import subprocess
 from datetime import datetime
@@ -12,9 +13,25 @@ from typing import List, Dict, Any
 import aiohttp
 import websockets
 
-from configer import ADMIN_ID, UP_TELEGRAM, RPC_URL, RPC_SECRET, FORWARD_ID, UP_ONEDRIVE, RCLONE_REMOTE, RCLONE_PATH, AUTO_DELETE_AFTER_UPLOAD
+from configer import ADMIN_ID, UP_TELEGRAM, RPC_URL, RPC_SECRET, FORWARD_ID, UP_ONEDRIVE, RCLONE_REMOTE, RCLONE_PATH, AUTO_DELETE_AFTER_UPLOAD, ENABLE_STREAM
 from util import get_file_name, imgCoverFromFile, progress, byte2_readable, hum_convert
 import re
+
+# 导入多客户端负载均衡（如果启用直链功能）
+upload_work_loads = {}  # 上传任务的负载跟踪
+if ENABLE_STREAM:
+    try:
+        from WebStreamer.bot import multi_clients as pyrogram_clients, channel_accessible_clients
+        # 初始化上传负载跟踪
+        upload_work_loads = {index: 0 for index in pyrogram_clients.keys()}
+    except ImportError:
+        pyrogram_clients = {}
+        channel_accessible_clients = set()
+        upload_work_loads = {}
+else:
+    pyrogram_clients = {}
+    channel_accessible_clients = set()
+    upload_work_loads = {}
 
 
 # logging.basicConfig(
@@ -437,6 +454,21 @@ class AsyncAria2Client:
     async def on_download_complete(self, result):
         gid = result['params'][0]['gid']
         print(f"===========下载 完成 任务id:{gid}")
+        
+        # 更新任务完成跟踪状态为 'completed'
+        try:
+            from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+            import asyncio as asyncio_module
+            
+            if task_completion_lock:
+                async with task_completion_lock:
+                    task_completion_tracker[gid] = {
+                        'status': 'completed',
+                        'completed_at': asyncio_module.get_event_loop().time()
+                    }
+        except Exception as e:
+            print(f"更新任务完成跟踪状态失败: {e}")
+        
         tellStatus = await self.tell_status(gid)
         files = tellStatus['files']
         
@@ -448,15 +480,59 @@ class AsyncAria2Client:
             if self.bot:
                 # 处理元数据文件
                 if '[METADATA]' in path:
-                    os.unlink(path)
+                    if os.path.exists(path):
+                        os.unlink(path)
                     return
                 
+                # 检查文件是否存在，如果不存在则尝试查找实际文件
+                actual_path = path
+                if not os.path.exists(path):
+                    # aria2 可能在下载时重命名了文件（添加 .1, .2 等后缀）
+                    # 尝试查找实际文件
+                    dir_path = os.path.dirname(path)
+                    base_name = os.path.basename(path)
+                    name_without_ext, ext = os.path.splitext(base_name)
+                    
+                    # 检查目录中是否有相似的文件名
+                    if os.path.exists(dir_path):
+                        try:
+                            for file_name in os.listdir(dir_path):
+                                # 检查是否是同一个文件（可能是 aria2 重命名的版本）
+                                if file_name.startswith(name_without_ext) and file_name.endswith(ext):
+                                    potential_path = os.path.join(dir_path, file_name)
+                                    # 验证文件大小是否合理（大于0）
+                                    if os.path.exists(potential_path) and os.path.getsize(potential_path) > 0:
+                                        # 检查是否是最近修改的（5分钟内）
+                                        file_mtime = os.path.getmtime(potential_path)
+                                        if time.time() - file_mtime < 300:  # 5分钟内
+                                            actual_path = potential_path
+                                            print(f"找到实际文件路径: {actual_path} (原始路径: {path})")
+                                            break
+                        except Exception as e:
+                            print(f"查找文件时出错: {e}")
+                
+                # 再次检查文件是否存在
+                if not os.path.exists(actual_path):
+                    print(f"文件不存在: {path} (尝试查找后仍不存在)")
+                    if msg:
+                        try:
+                            error_message = (
+                                f'❌ <b>文件不存在</b>\n\n'
+                                f'📁 <b>文件:</b> <code>{os.path.basename(path)}</code>\n'
+                                f'📂 <b>路径:</b> <code>{path}</code>\n\n'
+                                f'⚠️ 文件下载完成但文件不存在，可能已被删除或路径错误'
+                            )
+                            await self.bot.edit_message(msg, error_message, parse_mode='html')
+                        except Exception as e:
+                            print(f"更新错误消息失败: {e}")
+                    continue
+                
                 # 发送下载完成消息
-                file_name_display = os.path.basename(path)
+                file_name_display = os.path.basename(actual_path)
                 file_size = ""
                 try:
-                    if os.path.exists(path):
-                        file_size_bytes = os.path.getsize(path)
+                    if os.path.exists(actual_path):
+                        file_size_bytes = os.path.getsize(actual_path)
                         file_size = byte2_readable(file_size_bytes)
                 except:
                     pass
@@ -466,10 +542,12 @@ class AsyncAria2Client:
                         complete_text = (
                             f'✅ <b>下载完成</b>\n\n'
                             f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                            f'📂 <b>路径:</b> <code>{path}</code>'
+                            f'📂 <b>路径:</b> <code>{actual_path}</code>'
                         )
                         if file_size:
                             complete_text += f'\n💾 <b>大小:</b> {file_size}'
+                        if actual_path != path:
+                            complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
                         msg = await self.bot.edit_message(msg, complete_text, parse_mode='html')
                         self.download_messages[gid] = msg
                     except Exception as e:
@@ -478,10 +556,12 @@ class AsyncAria2Client:
                         complete_text = (
                             f'✅ <b>下载完成</b>\n\n'
                             f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                            f'📂 <b>路径:</b> <code>{path}</code>'
+                            f'📂 <b>路径:</b> <code>{actual_path}</code>'
                         )
                         if file_size:
                             complete_text += f'\n💾 <b>大小:</b> {file_size}'
+                        if actual_path != path:
+                            complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
                         msg = await self.bot.send_message(ADMIN_ID, complete_text, parse_mode='html')
                         self.download_messages[gid] = msg
                 else:
@@ -489,82 +569,22 @@ class AsyncAria2Client:
                     complete_text = (
                         f'✅ <b>下载完成</b>\n\n'
                         f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                        f'📂 <b>路径:</b> <code>{path}</code>'
+                        f'📂 <b>路径:</b> <code>{actual_path}</code>'
                     )
                     if file_size:
                         complete_text += f'\n💾 <b>大小:</b> {file_size}'
+                    if actual_path != path:
+                        complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
                     msg = await self.bot.send_message(ADMIN_ID, complete_text, parse_mode='html')
                     self.download_messages[gid] = msg
                 
                 # 根据配置选择上传方式
                 if UP_ONEDRIVE:
-                    # 使用rclone上传到OneDrive，传递消息对象
-                    await self.upload_to_onedrive(path, msg)
+                    # 使用rclone上传到OneDrive，传递消息对象、实际路径和GID
+                    await self.upload_to_onedrive(actual_path, msg, gid)
                 elif UP_TELEGRAM:
-                    # 上传到Telegram的原有逻辑
-                    try:
-                        file_name_display = os.path.basename(path)
-                        upload_start_msg = (
-                            f'📤 <b>上传到 Telegram</b>\n\n'
-                            f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                            f'📂 <b>路径:</b> <code>{path}</code>\n\n'
-                            f'⏳ <b>准备上传中...</b>'
-                        )
-                        
-                        # 检查文件是否为图片
-                        if path.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                            msg = await self.bot.send_message(ADMIN_ID, upload_start_msg, parse_mode='html')
-                            partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=path)
-                            temp_msg = await self.bot.send_file(ADMIN_ID,
-                                                                path,
-                                                                progress_callback=partial_callback
-                                                                )
-                            if FORWARD_ID:
-                                await temp_msg.forward_to(int(FORWARD_ID))
-
-                            await msg.delete()
-                        # 检查文件是否为视频
-                        elif path.endswith(('.mp4', '.mkv', '.avi', '.mov')):
-                            pat = os.path.dirname(path)
-                            filename = os.path.basename(path).split('.')[0]
-                            # 生成视频封面
-                            imgCoverFromFile(path, pat + '/' + filename + '.jpg')
-                            msg = await self.bot.send_message(ADMIN_ID, upload_start_msg, parse_mode='html')
-                            partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=path)
-                            temp_msg = await self.bot.send_file(ADMIN_ID,
-                                                                path,
-                                                                thumb=pat + '/' + filename + '.jpg',
-                                                                progress_callback=partial_callback
-                                                                )
-                            if FORWARD_ID:
-                                await temp_msg.forward_to(int(FORWARD_ID))
-
-                            await msg.delete()
-                            os.unlink(pat + '/' + filename + '.jpg')
-                            if AUTO_DELETE_AFTER_UPLOAD:
-                                os.unlink(path)
-                        else:
-                            msg = await self.bot.send_message(ADMIN_ID, upload_start_msg, parse_mode='html')
-                            partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=path)
-                            temp_msg = await self.bot.send_file(ADMIN_ID,
-                                                                path,
-                                                                progress_callback=partial_callback
-                                                                )
-                            if FORWARD_ID:
-                                await temp_msg.forward_to(int(FORWARD_ID))
-
-                            await msg.delete()
-                            if AUTO_DELETE_AFTER_UPLOAD:
-                                os.unlink(path)
-
-                    except Exception as e:
-                        print(e)
-                        error_msg = (
-                            f'❌ <b>上传失败</b>\n\n'
-                            f'📂 <b>路径:</b> <code>{path}</code>\n\n'
-                            f'⚠️ <b>错误:</b> 文件不存在或无法访问'
-                        )
-                        await self.bot.send_message(ADMIN_ID, error_msg, parse_mode='html')
+                    # 上传到Telegram，使用多客户端负载均衡（如果启用）
+                    await self.upload_to_telegram_with_load_balance(actual_path, gid)
 
     async def on_download_pause(self, result):
         gid = result['params'][0]['gid']
@@ -646,10 +666,11 @@ class AsyncAria2Client:
         data = await self.post_body(rpc_body)
         return data['result']
 
-    async def upload_to_onedrive(self, file_path, msg=None):
+    async def upload_to_onedrive(self, file_path, msg=None, gid=None):
         """
         使用rclone将文件上传到OneDrive
         msg: 可选的消息对象，如果提供则编辑该消息而不是发送新消息
+        gid: 下载任务GID，用于跟踪任务完成状态
         上传完成并删除本地文件后，会自动删除该消息
         """
         file_name = os.path.basename(file_path)  # 在函数开始处定义，确保异常处理中可用
@@ -682,7 +703,7 @@ class AsyncAria2Client:
                 "-P",
                 "--transfers", "16",         # 并行传输数量（更保守）
                 "--checkers", "16",          # 并行检查数量
-                "--buffer-size", "32M",     # 缓冲区大小
+                "--buffer-size", "250M",     # 缓冲区大小
                 "--log-level", "INFO",      # 日志级别
                 "--log-file", "/app/rclone.log"  # 日志文件
             ]
@@ -787,11 +808,43 @@ class AsyncAria2Client:
                         if "not modified" not in str(e).lower():
                             print(f"更新上传成功消息失败: {e}")
                 
+                # 更新任务完成跟踪状态为 'uploaded'
+                if gid:
+                    try:
+                        from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                        import asyncio as asyncio_module
+                        
+                        if task_completion_lock:
+                            async with task_completion_lock:
+                                task_completion_tracker[gid] = {
+                                    'status': 'uploaded',
+                                    'completed_at': asyncio_module.get_event_loop().time()
+                                }
+                                print(f"任务 {gid} 已标记为已上传")
+                    except Exception as e:
+                        print(f"更新任务上传状态失败: {e}")
+                
                 # 上传成功后删除本地文件
                 if AUTO_DELETE_AFTER_UPLOAD:
                     try:
                         os.unlink(file_path)
                         print(f"已删除本地文件: {file_path}")
+                        
+                        # 更新任务完成跟踪状态为 'cleaned'
+                        if gid:
+                            try:
+                                from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                                import asyncio as asyncio_module
+                                
+                                if task_completion_lock:
+                                    async with task_completion_lock:
+                                        task_completion_tracker[gid] = {
+                                            'status': 'cleaned',
+                                            'completed_at': asyncio_module.get_event_loop().time()
+                                        }
+                                        print(f"任务 {gid} 已标记为已清理")
+                            except Exception as e:
+                                print(f"更新任务清理状态失败: {e}")
                         
                         # 删除本地文件成功后，删除消息
                         if self.bot and msg:
@@ -916,6 +969,238 @@ class AsyncAria2Client:
                 else:
                     await self.bot.send_message(ADMIN_ID, error_message, parse_mode='html')
             return False
+
+    async def upload_to_telegram_with_load_balance(self, file_path, gid):
+        """
+        使用多客户端负载均衡上传文件到Telegram
+        """
+        client_index = None
+        try:
+            file_name_display = os.path.basename(file_path)
+            upload_start_msg = (
+                f'📤 <b>上传到 Telegram</b>\n\n'
+                f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
+                f'📂 <b>路径:</b> <code>{file_path}</code>\n\n'
+                f'⏳ <b>准备上传中...</b>'
+            )
+            
+            # 选择上传客户端（使用负载均衡）
+            upload_client = None
+            
+            if pyrogram_clients and len(pyrogram_clients) > 0:
+                # 使用Pyrogram多客户端负载均衡
+                # 优先选择能访问频道的客户端
+                if channel_accessible_clients:
+                    available_loads = {
+                        k: v for k, v in upload_work_loads.items() 
+                        if k in channel_accessible_clients and k in pyrogram_clients
+                    }
+                    if available_loads:
+                        client_index = min(available_loads, key=available_loads.get)
+                    else:
+                        # 回退到所有客户端
+                        valid_loads = {k: v for k, v in upload_work_loads.items() if k in pyrogram_clients}
+                        if valid_loads:
+                            client_index = min(valid_loads, key=valid_loads.get)
+                else:
+                    # 使用所有客户端
+                    valid_loads = {k: v for k, v in upload_work_loads.items() if k in pyrogram_clients}
+                    if valid_loads:
+                        client_index = min(valid_loads, key=valid_loads.get)
+                
+                if client_index is not None and client_index in pyrogram_clients:
+                    upload_client = pyrogram_clients[client_index]
+                    upload_work_loads[client_index] = upload_work_loads.get(client_index, 0) + 1
+                    print(f"使用Pyrogram客户端 {client_index} 上传文件（上传负载: {upload_work_loads[client_index]}）")
+            
+            # 如果没有Pyrogram客户端，使用Telethon bot
+            if upload_client is None:
+                upload_client = self.bot
+                print("使用Telethon bot上传文件（未启用多客户端）")
+            
+            # 发送开始消息
+            if hasattr(upload_client, 'send_message') and not hasattr(upload_client, 'get_me'):  # Telethon
+                msg = await upload_client.send_message(ADMIN_ID, upload_start_msg, parse_mode='html')
+            else:  # Pyrogram
+                msg = await upload_client.send_message(ADMIN_ID, upload_start_msg)
+            
+            # 根据文件类型上传
+            try:
+                if file_path.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                    # 图片文件
+                    if hasattr(upload_client, 'send_file'):  # Telethon
+                        partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path)
+                        temp_msg = await upload_client.send_file(ADMIN_ID, file_path, progress_callback=partial_callback)
+                    else:  # Pyrogram
+                        temp_msg = await upload_client.send_photo(ADMIN_ID, file_path)
+                    
+                    if FORWARD_ID:
+                        if hasattr(temp_msg, 'forward_to'):  # Telethon
+                            await temp_msg.forward_to(int(FORWARD_ID))
+                        else:  # Pyrogram
+                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                    
+                    if hasattr(msg, 'delete'):
+                        await msg.delete()
+                    
+                    # 更新任务完成跟踪状态为 'uploaded'（Telegram上传）
+                    if gid:
+                        try:
+                            from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                            import asyncio as asyncio_module
+                            
+                            if task_completion_lock:
+                                async with task_completion_lock:
+                                    task_completion_tracker[gid] = {
+                                        'status': 'uploaded',
+                                        'completed_at': asyncio_module.get_event_loop().time()
+                                    }
+                                    print(f"任务 {gid} 已标记为已上传（Telegram）")
+                        except Exception as e:
+                            print(f"更新任务上传状态失败: {e}")
+                    
+                    # 图片上传后不需要清理（图片通常不删除），但如果启用了AUTO_DELETE_AFTER_UPLOAD，也需要清理
+                    if AUTO_DELETE_AFTER_UPLOAD and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                            # 更新任务完成跟踪状态为 'cleaned'（Telegram上传）
+                            if gid:
+                                try:
+                                    from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                                    import asyncio as asyncio_module
+                                    
+                                    if task_completion_lock:
+                                        async with task_completion_lock:
+                                            task_completion_tracker[gid] = {
+                                                'status': 'cleaned',
+                                                'completed_at': asyncio_module.get_event_loop().time()
+                                            }
+                                            print(f"任务 {gid} 已标记为已清理（Telegram上传）")
+                                except Exception as e:
+                                    print(f"更新任务清理状态失败: {e}")
+                        except Exception as e:
+                            print(f"删除图片文件失败: {e}")
+                        
+                elif file_path.endswith(('.mp4', '.mkv', '.avi', '.mov')):
+                    # 视频文件
+                    pat = os.path.dirname(file_path)
+                    filename = os.path.basename(file_path).split('.')[0]
+                    thumb_path = pat + '/' + filename + '.jpg'
+                    
+                    # 生成视频封面
+                    imgCoverFromFile(file_path, thumb_path)
+                    
+                    if hasattr(upload_client, 'send_file'):  # Telethon
+                        partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path)
+                        temp_msg = await upload_client.send_file(
+                            ADMIN_ID, 
+                            file_path, 
+                            thumb=thumb_path,
+                            progress_callback=partial_callback
+                        )
+                    else:  # Pyrogram
+                        temp_msg = await upload_client.send_video(ADMIN_ID, file_path, thumb=thumb_path)
+                    
+                    if FORWARD_ID:
+                        if hasattr(temp_msg, 'forward_to'):  # Telethon
+                            await temp_msg.forward_to(int(FORWARD_ID))
+                        else:  # Pyrogram
+                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                    
+                    if hasattr(msg, 'delete'):
+                        await msg.delete()
+                    
+                    # 更新任务完成跟踪状态为 'uploaded'（Telegram上传）
+                    if gid:
+                        try:
+                            from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                            import asyncio as asyncio_module
+                            
+                            if task_completion_lock:
+                                async with task_completion_lock:
+                                    task_completion_tracker[gid] = {
+                                        'status': 'uploaded',
+                                        'completed_at': asyncio_module.get_event_loop().time()
+                                    }
+                                    print(f"任务 {gid} 已标记为已上传（Telegram）")
+                        except Exception as e:
+                            print(f"更新任务上传状态失败: {e}")
+                    
+                    # 删除封面
+                    if os.path.exists(thumb_path):
+                        os.unlink(thumb_path)
+                    
+                    if AUTO_DELETE_AFTER_UPLOAD:
+                        os.unlink(file_path)
+                        # 更新任务完成跟踪状态为 'cleaned'（Telegram上传）
+                        if gid:
+                            try:
+                                from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                                import asyncio as asyncio_module
+                                
+                                if task_completion_lock:
+                                    async with task_completion_lock:
+                                        task_completion_tracker[gid] = {
+                                            'status': 'cleaned',
+                                            'completed_at': asyncio_module.get_event_loop().time()
+                                        }
+                                        print(f"任务 {gid} 已标记为已清理（Telegram上传）")
+                            except Exception as e:
+                                print(f"更新任务清理状态失败: {e}")
+                else:
+                    # 其他文件类型
+                    if hasattr(upload_client, 'send_file'):  # Telethon
+                        partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path)
+                        temp_msg = await upload_client.send_file(ADMIN_ID, file_path, progress_callback=partial_callback)
+                    else:  # Pyrogram
+                        temp_msg = await upload_client.send_document(ADMIN_ID, file_path)
+                    
+                    if FORWARD_ID:
+                        if hasattr(temp_msg, 'forward_to'):  # Telethon
+                            await temp_msg.forward_to(int(FORWARD_ID))
+                        else:  # Pyrogram
+                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                    
+                    if hasattr(msg, 'delete'):
+                        await msg.delete()
+                    
+                    if AUTO_DELETE_AFTER_UPLOAD:
+                        os.unlink(file_path)
+                        # 更新任务完成跟踪状态为 'cleaned'（Telegram上传）
+                        if gid:
+                            try:
+                                from WebStreamer.bot.plugins.stream import task_completion_tracker, task_completion_lock
+                                import asyncio as asyncio_module
+                                
+                                if task_completion_lock:
+                                    async with task_completion_lock:
+                                        task_completion_tracker[gid] = {
+                                            'status': 'cleaned',
+                                            'completed_at': asyncio_module.get_event_loop().time()
+                                        }
+                                        print(f"任务 {gid} 已标记为已清理（Telegram上传）")
+                            except Exception as e:
+                                print(f"更新任务清理状态失败: {e}")
+                        
+            finally:
+                # 减少上传负载
+                if client_index is not None and client_index in upload_work_loads:
+                    upload_work_loads[client_index] = max(0, upload_work_loads[client_index] - 1)
+                    
+        except Exception as e:
+            print(f"上传到Telegram失败: {e}")
+            import traceback
+            traceback.print_exc()
+            error_msg = (
+                f'❌ <b>上传失败</b>\n\n'
+                f'📂 <b>路径:</b> <code>{file_path}</code>\n\n'
+                f'⚠️ <b>错误:</b> {str(e)}'
+            )
+            if self.bot:
+                await self.bot.send_message(ADMIN_ID, error_msg, parse_mode='html')
+            # 确保减少负载
+            if client_index is not None and client_index in upload_work_loads:
+                upload_work_loads[client_index] = max(0, upload_work_loads[client_index] - 1)
 
     async def callback(self, current, total, gid, msg=None, path=None):
         """

@@ -20,7 +20,7 @@ if [ ! -f "$CONFIG_DIR/aria2.conf" ]; then
     cat > "$CONFIG_DIR/aria2.conf" << EOF
 # 基本配置
 dir=/root/downloads
-disable-ipv6=true
+disable-ipv6=false
 enable-rpc=true
 rpc-allow-origin-all=true
 rpc-listen-all=true

@@ -37,6 +37,9 @@ BIN_CHANNEL: -100xxxxxxxxxx        # 频道ID（必须以 -100 开头）
 # Web服务器端口
 STREAM_PORT: 8080
 # Web服务器绑定地址
+# 设置为 0.0.0.0 将同时启用IPv4和IPv6双栈支持（推荐）
+# 设置为 :: 仅绑定IPv6
+# 设置为具体IP地址则只绑定该地址
 STREAM_BIND_ADDRESS: 0.0.0.0
 # 哈希长度（5-64之间）
 STREAM_HASH_LENGTH: 6
@@ -58,4 +61,20 @@ STREAM_ALLOWED_USERS:
 STREAM_AUTO_DOWNLOAD: true
 # 是否发送直链信息给用户（默认不启用，设置为 true 后才会发送直链信息给用户，关闭后仍会生成直链并添加到下载队列）
 SEND_STREAM_LINK: false
+# 多机器人负载均衡配置（可选）
+# 配置额外的BOT_TOKEN以实现负载均衡，提高并发处理能力
+# 注意：这些是额外的token，默认的BOT_TOKEN（上面的BOT_TOKEN）会作为第一个客户端（索引0）
+# 格式：逗号分隔的多个BOT_TOKEN，或YAML列表格式
+# 示例1（逗号分隔，启用2个客户端：默认BOT_TOKEN + 1个额外token）:
+# MULTI_BOT_TOKENS: "token2:xxx"
+# 示例2（逗号分隔，启用3个客户端：默认BOT_TOKEN + 2个额外token）:
+# MULTI_BOT_TOKENS: "token2:xxx,token3:xxx"
+# 示例3（YAML列表格式，启用4个客户端：默认BOT_TOKEN + 3个额外token）:
+# MULTI_BOT_TOKENS:
+#   - "token2:xxx"
+#   - "token3:xxx"
+#   - "token4:xxx"
+# 如果配置了至少一个额外的token，将自动启用多客户端负载均衡模式
+# 留空则使用单客户端模式（仅使用默认的BOT_TOKEN）
+MULTI_BOT_TOKENS:
 

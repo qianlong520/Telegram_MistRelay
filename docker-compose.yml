@@ -1,9 +1,17 @@
 services:
   mistrelay:
-    build: .
+    build: 
+      context: .
+      # 如果构建时遇到DNS问题，可以在构建时设置DNS
+      # 注意：build阶段的DNS需要在Docker daemon级别配置，或使用build args
     container_name: mistrelay
     restart: unless-stopped
     network_mode: host
+    # DNS配置（运行时）
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 114.114.114.114
     volumes:
       - ./db:/app/db
       - ./downloads:/root/downloads  # 下载目录（可根据需要修改）

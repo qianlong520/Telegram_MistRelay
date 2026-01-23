@@ -38,9 +38,24 @@ if ENABLE_STREAM:
         from WebStreamer.server import web_server
         from WebStreamer.bot.clients import initialize_clients, StreamBot
         from WebStreamer import Var, utils
+        from WebStreamer.bot import multi_clients, work_loads, channel_accessible_clients
+        # 导入上传负载（从async_aria2_client模块）
+        try:
+            from async_aria2_client import upload_work_loads
+        except:
+            upload_work_loads = {}
     except ImportError as e:
         log.warning(f"直链功能导入失败: {e}，将禁用直链功能")
         ENABLE_STREAM = False
+        multi_clients = {}
+        work_loads = {}
+        channel_accessible_clients = set()
+        upload_work_loads = {}
+else:
+    multi_clients = {}
+    work_loads = {}
+    channel_accessible_clients = set()
+    upload_work_loads = {}
 
 # 如果RPC_URL中的主机名不是localhost或IP地址，则在Docker环境中使用localhost
 url_parts = RPC_URL.split(':')
@@ -155,6 +170,9 @@ async def send_welcome(event):
     elif text == '⌛️ 正在等待':
         await waiting(event)
         return
+    elif text == '📋 消息队列':
+        await show_message_queue(event)
+        return
     elif text == '✅ 已完成/停止':
         await stoped(event)
         return
@@ -174,13 +192,14 @@ async def send_welcome(event):
     # 系统功能菜单
     elif text == '📊 系统信息':
         result = await client.get_global_option()
-        await event.respond(
+        msg = await event.respond(
             f'📁 下载目录: <code>{result["dir"]}</code>\n'
             f'🔢 最大同时下载数: <code>{result["max-concurrent-downloads"]}</code>\n'
             f'🔄 允许覆盖: {"是" if result["allow-overwrite"] else "否"}\n'
             f'📎 直链功能: {"已启用" if ENABLE_STREAM else "已禁用"}',
             parse_mode='html'
         )
+        await auto_delete_message(msg)
         return
     elif text == '🔗 直链状态':
         if ENABLE_STREAM and Var:
@@ -188,7 +207,7 @@ async def send_welcome(event):
             auto_download = "✅ 已启用" if Var.AUTO_DOWNLOAD else "❌ 已禁用"
             bin_channel = f"<code>{Var.BIN_CHANNEL}</code>" if Var.BIN_CHANNEL else "❌ 未配置"
             stream_url = Var.URL if Var else "未配置"
-            await event.respond(
+            msg = await event.respond(
                 f'📎 <b>直链功能状态</b>\n\n'
                 f'状态: {status}\n'
                 f'自动下载: {auto_download}\n'
@@ -197,7 +216,11 @@ async def send_welcome(event):
                 parse_mode='html'
             )
         else:
-            await event.respond('❌ 直链功能未启用', parse_mode='html')
+            msg = await event.respond('❌ 直链功能未启用', parse_mode='html')
+        await auto_delete_message(msg)
+        return
+    elif text == '⚖️ 负载状态':
+        await show_load_status(event)
         return
     elif text == '📋 显示菜单':
         await event.reply("📋 功能菜单", parse_mode='html', buttons=get_menu())
@@ -274,6 +297,25 @@ def get_media_from_message(message: "Message") -> Any:
             return media
 
 
+async def auto_delete_message(msg, delay=60):
+    """
+    在指定延迟后自动删除消息
+    
+    Args:
+        msg: 要删除的消息对象
+        delay: 延迟时间（秒），默认60秒
+    """
+    async def _delete():
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception as e:
+            log.debug(f"自动删除消息失败: {e}")
+    
+    # 在后台任务中执行删除
+    asyncio.create_task(_delete())
+
+
 async def remove_all(event):
     # 过滤 已完成或停止
     tasks = await client.tell_stopped(0, 500)
@@ -282,21 +324,24 @@ async def remove_all(event):
     result = await client.get_global_option()
     print('清空目录 ', result['dir'])
     shutil.rmtree(result['dir'], ignore_errors=True)
-    await event.respond('任务已清空,所有文件已删除', parse_mode='html')
+    msg = await event.respond('任务已清空,所有文件已删除', parse_mode='html')
+    await auto_delete_message(msg)
 
 
 async def unpause_task(event):
     tasks = await client.tell_waiting(0, 50)
     # 筛选send_id对应的任务
     if len(tasks) == 0:
-        await event.respond('没有已暂停的任务,无法恢复下载', parse_mode='markdown')
+        msg = await event.respond('没有已暂停的任务,无法恢复下载', parse_mode='html')
+        await auto_delete_message(msg)
         return
     buttons = []
     for task in tasks:
         file_name = get_file_name(task)
         gid = task['gid']
         buttons.append([Button.inline(file_name, 'unpause-task.' + gid)])
-    await event.respond('请选择要恢复▶️的任务', parse_mode='html', buttons=buttons)
+    msg = await event.respond('请选择要恢复▶️的任务', parse_mode='html', buttons=buttons)
+    await auto_delete_message(msg)
 
 
 async def remove_task(event):
@@ -310,7 +355,8 @@ async def remove_task(event):
     for task in tasks:
         temp_task.append(task)
     if len(temp_task) == 0:
-        await event.respond('没有正在运行或等待的任务,无删除选项', parse_mode='markdown')
+        msg = await event.respond('没有正在运行或等待的任务,无删除选项', parse_mode='html')
+        await auto_delete_message(msg)
         return
     # 拼接所有任务
     buttons = []
@@ -318,13 +364,15 @@ async def remove_task(event):
         file_name = get_file_name(task)
         gid = task['gid']
         buttons.append([Button.inline(file_name, 'del-task.' + gid)])
-    await event.respond('请选择要删除❌ 的任务', parse_mode='html', buttons=buttons)
+    msg = await event.respond('请选择要删除❌ 的任务', parse_mode='html', buttons=buttons)
+    await auto_delete_message(msg)
 
 
 async def stop_task(event):
     tasks = await client.tell_active()
     if len(tasks) == 0:
-        await event.respond('没有正在运行的任务,无暂停选项,请先添加任务', parse_mode='markdown')
+        msg = await event.respond('没有正在运行的任务,无暂停选项,请先添加任务', parse_mode='html')
+        await auto_delete_message(msg)
         return
     buttons = []
     for task in tasks:
@@ -332,15 +380,62 @@ async def stop_task(event):
         gid = task['gid']
         buttons.append([Button.inline(fileName, 'pause-task.' + gid)])
 
-    await event.respond('请选择要暂停⏸️的任务', parse_mode='html', buttons=buttons)
+    msg = await event.respond('请选择要暂停⏸️的任务', parse_mode='html', buttons=buttons)
+    await auto_delete_message(msg)
 
 
 async def downloading(event):
+    # 先显示消息队列状态
+    queue_msg = ""
+    if ENABLE_STREAM:
+        try:
+            from WebStreamer.bot.plugins.stream import get_queue_status
+            queue_status = await get_queue_status()
+            
+            if queue_status['current_processing']:
+                current = queue_status['current_processing']
+                queue_msg = "📋 <b>消息队列状态</b>\n\n"
+                queue_msg += f"🔄 <b>正在处理:</b>\n"
+                queue_msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
+                queue_msg += f"  • 标题: <code>{current.get('title', '未知')}</code>\n"
+                
+                if current.get('type') == 'media_group':
+                    total = current.get('media_group_total', 0)
+                    queue_msg += f"  • 类型: 媒体组 ({total} 个文件)\n"
+                else:
+                    queue_msg += f"  • 类型: 单个文件\n"
+                
+                task_gids = current.get('task_gids', [])
+                if task_gids:
+                    queue_msg += f"  • 下载任务数: {len(task_gids)}\n"
+                
+                queue_msg += "\n"
+            
+            if queue_status['waiting_count'] > 0:
+                queue_msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
+                for i, item in enumerate(queue_status['waiting_items'][:10], 1):  # 最多显示10个
+                    if item['type'] == 'media_group':
+                        queue_msg += f"  {i}. <code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
+                    else:
+                        queue_msg += f"  {i}. <code>{item['title']}</code>\n"
+                
+                if queue_status['waiting_count'] > 10:
+                    queue_msg += f"  ... 还有 {queue_status['waiting_count'] - 10} 个任务\n"
+                queue_msg += "\n"
+        except Exception as e:
+            log.debug(f"获取消息队列状态失败: {e}")
+    
+    # 显示aria2下载任务
     tasks = await client.tell_active()
     if len(tasks) == 0:
-        await event.respond('没有正在运行的任务', parse_mode='html')
+        if queue_msg:
+            msg = await event.respond(queue_msg + "\n📥 <b>aria2下载任务</b>\n\n没有正在运行的任务", parse_mode='html')
+        else:
+            msg = await event.respond('没有正在运行的任务', parse_mode='html')
+        await auto_delete_message(msg)
         return
-    send_msg = ''
+    
+    send_msg = queue_msg + "📥 <b>aria2下载任务</b>\n\n" if queue_msg else "📥 <b>aria2下载任务</b>\n\n"
     for task in tasks:
         completedLength = task['completedLength']
         totalLength = task['totalLength']
@@ -352,19 +447,64 @@ async def downloading(event):
         size = byte2_readable(int(totalLength))
         speed = hum_convert(int(downloadSpeed))
 
-        send_msg = send_msg + '任务名称: <b>' + fileName + '</b>\n进度: ' + prog + '\n大小: ' + size + '\n速度: ' + speed + '/s\n\n'
-    if send_msg == '':
-        await event.respond('个别任务无法识别名称，请使用aria2Ng查看', parse_mode='html')
+        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
+        send_msg = send_msg + '进度: ' + prog + '\n'
+        send_msg = send_msg + '大小: ' + size + '\n'
+        send_msg = send_msg + '速度: ' + speed + '/s\n\n'
+    if send_msg == queue_msg + "📥 <b>aria2下载任务</b>\n\n" if queue_msg else "📥 <b>aria2下载任务</b>\n\n":
+        msg = await event.respond(send_msg + '个别任务无法识别名称，请使用aria2Ng查看', parse_mode='html')
+        await auto_delete_message(msg)
         return
-    await event.respond(send_msg, parse_mode='html')
+    msg = await event.respond(send_msg, parse_mode='html')
+    await auto_delete_message(msg)
 
 
 async def waiting(event):
+    # 显示消息队列等待状态
+    if ENABLE_STREAM:
+        try:
+            from WebStreamer.bot.plugins.stream import get_queue_status
+            queue_status = await get_queue_status()
+            
+            if queue_status['waiting_count'] > 0 or queue_status['current_processing']:
+                queue_msg = "📋 <b>消息队列</b>\n\n"
+                
+                if queue_status['current_processing']:
+                    current = queue_status['current_processing']
+                    queue_msg += f"🔄 <b>正在处理:</b>\n"
+                    queue_msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
+                    queue_msg += f"  • 标题: <code>{current.get('title', '未知')}</code>\n"
+                    
+                    if current.get('type') == 'media_group':
+                        total = current.get('media_group_total', 0)
+                        queue_msg += f"  • 媒体组 ({total} 个文件)\n"
+                    else:
+                        queue_msg += f"  • 单个文件\n"
+                    queue_msg += "\n"
+                
+                if queue_status['waiting_count'] > 0:
+                    queue_msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
+                    for i, item in enumerate(queue_status['waiting_items'], 1):
+                        queue_msg += f"  {i}. "
+                        if item['type'] == 'media_group':
+                            queue_msg += f"<code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
+                        else:
+                            queue_msg += f"<code>{item['title']}</code>\n"
+                    queue_msg += "\n"
+                
+                msg = await event.respond(queue_msg, parse_mode='html')
+                await auto_delete_message(msg)
+                return
+        except Exception as e:
+            log.debug(f"获取消息队列状态失败: {e}")
+    
+    # 显示aria2等待任务
     tasks = await client.tell_waiting(0, 30)
     if len(tasks) == 0:
-        await event.respond('没有正在等待的任务', parse_mode='markdown')
+        msg = await event.respond('没有正在等待的任务', parse_mode='html')
+        await auto_delete_message(msg)
         return
-    send_msg = ''
+    send_msg = '📥 <b>aria2等待任务</b>\n\n'
     for task in tasks:
         completedLength = task['completedLength']
         totalLength = task['totalLength']
@@ -373,16 +513,93 @@ async def waiting(event):
         prog = progress(int(totalLength), int(completedLength))
         size = byte2_readable(int(totalLength))
         speed = hum_convert(int(downloadSpeed))
-        send_msg = send_msg + '任务名称: ' + fileName + '\n进度: ' + prog + '\n大小: ' + size + '\n速度: ' + speed + '\n\n'
-    await event.respond(send_msg, parse_mode='html')
+        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
+        send_msg = send_msg + '进度: ' + prog + '\n'
+        send_msg = send_msg + '大小: ' + size + '\n'
+        send_msg = send_msg + '速度: ' + speed + '\n\n'
+    msg = await event.respond(send_msg, parse_mode='html')
+    await auto_delete_message(msg)
+
+
+async def show_message_queue(event):
+    """显示消息队列状态"""
+    if not ENABLE_STREAM:
+        msg = await event.respond('❌ 直链功能未启用，无法查看消息队列', parse_mode='html')
+        await auto_delete_message(msg)
+        return
+    
+    try:
+        from WebStreamer.bot.plugins.stream import get_queue_status
+        queue_status = await get_queue_status()
+        
+        msg = "📋 <b>消息队列状态</b>\n\n"
+        
+        # 当前正在处理的项目
+        if queue_status['current_processing']:
+            current = queue_status['current_processing']
+            msg += "🔄 <b>正在处理:</b>\n"
+            msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
+            msg += f"  • 标题: <code>{current.get('title', '未知')}</code>\n"
+            
+            if current.get('type') == 'media_group':
+                total = current.get('media_group_total', 0)
+                msg += f"  • 类型: 媒体组 ({total} 个文件)\n"
+            else:
+                msg += f"  • 类型: 单个文件\n"
+            
+            task_gids = current.get('task_gids', [])
+            if task_gids:
+                msg += f"  • 下载任务数: {len(task_gids)}\n"
+                # 显示任务状态
+                try:
+                    completed_count = 0
+                    for gid in task_gids:
+                        try:
+                            status = await client.tell_status(gid)
+                            if status.get('status') == 'complete':
+                                completed_count += 1
+                        except:
+                            pass
+                    if completed_count > 0:
+                        msg += f"  • 已完成: {completed_count}/{len(task_gids)}\n"
+                except:
+                    pass
+            
+            msg += "\n"
+        else:
+            msg += "🔄 <b>正在处理:</b> 无\n\n"
+        
+        # 等待中的项目
+        if queue_status['waiting_count'] > 0:
+            msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
+            for i, item in enumerate(queue_status['waiting_items'], 1):
+                msg += f"  {i}. "
+                if item['type'] == 'media_group':
+                    msg += f"<code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
+                else:
+                    msg += f"<code>{item['title']}</code>\n"
+            msg += "\n"
+        else:
+            msg += "⏳ <b>等待中:</b> 无\n\n"
+        
+        # 队列大小
+        msg += f"📊 <b>队列大小:</b> {queue_status['queue_size']}\n"
+        
+        response_msg = await event.respond(msg, parse_mode='html')
+        await auto_delete_message(response_msg)
+    except Exception as e:
+        log.error(f"显示消息队列状态失败: {e}", exc_info=True)
+        error_msg = await event.respond(f'❌ 获取消息队列状态失败: {e}', parse_mode='html')
+        await auto_delete_message(error_msg)
 
 
 async def stoped(event):
     tasks = await client.tell_stopped(0, 30)
     if len(tasks) == 0:
-        await event.respond('没有已完成或停止的任务', parse_mode='markdown')
+        msg = await event.respond('没有已完成或停止的任务', parse_mode='html')
+        await auto_delete_message(msg)
         return
-    send_msg = ''
+    send_msg = '📥 <b>已完成/停止的任务</b>\n\n'
     for task in reversed(tasks):
         completedLength = task['completedLength']
         totalLength = task['totalLength']
@@ -391,8 +608,89 @@ async def stoped(event):
         prog = progress(int(totalLength), int(completedLength))
         size = byte2_readable(int(totalLength))
         speed = hum_convert(int(downloadSpeed))
-        send_msg = send_msg + '任务名称: ' + fileName + '\n进度: ' + prog + '\n大小: ' + size + '\n速度: ' + speed + '\n\n'
-    await event.respond(send_msg, parse_mode='html')
+        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
+        send_msg = send_msg + '进度: ' + prog + '\n'
+        send_msg = send_msg + '大小: ' + size + '\n'
+        send_msg = send_msg + '速度: ' + speed + '\n\n'
+    msg = await event.respond(send_msg, parse_mode='html')
+    await auto_delete_message(msg)
+
+
+async def show_load_status(event):
+    """显示多机器人负载状态，60秒后自动删除"""
+    if not ENABLE_STREAM:
+        msg = await event.respond('❌ 直链功能未启用，无法查看负载状态', parse_mode='html')
+        await auto_delete_message(msg)
+        return
+    
+    try:
+        # 获取负载信息
+        if not work_loads:
+            load_msg = (
+                '⚖️ <b>负载状态</b>\n\n'
+                '❌ 没有可用的客户端'
+            )
+        else:
+            # 构建负载信息
+            load_lines = []
+            total_load = 0
+            
+            # 按索引排序显示
+            sorted_clients = sorted(work_loads.items(), key=lambda x: x[0])
+            
+            for index, load in sorted_clients:
+                if index in multi_clients:
+                    client = multi_clients[index]
+                    username = getattr(client, 'username', f'Bot{index+1}')
+                    
+                    # 检查是否可访问频道
+                    channel_status = '✅' if index in channel_accessible_clients else '⚠️'
+                    
+                    # 负载指示器
+                    if load == 0:
+                        load_indicator = '⚪'
+                    elif load <= 2:
+                        load_indicator = '🟢'
+                    elif load <= 5:
+                        load_indicator = '🟡'
+                    else:
+                        load_indicator = '🔴'
+                    
+                    # 获取上传负载
+                    upload_load = upload_work_loads.get(index, 0)
+                    total_client_load = load + upload_load
+                    
+                    load_lines.append(
+                        f'{load_indicator} <b>Bot {index + 1}</b> (@{username})\n'
+                        f'   下载负载: <code>{load}</code> | 上传负载: <code>{upload_load}</code> | 总负载: <code>{total_client_load}</code> | 频道: {channel_status}\n'
+                    )
+                    total_load += load
+            
+            # 计算统计信息
+            active_clients = sum(1 for load in work_loads.values() if load > 0)
+            total_clients = len(multi_clients)
+            avg_load = total_load / total_clients if total_clients > 0 else 0
+            
+            load_msg = (
+                '⚖️ <b>多机器人负载状态</b>\n\n'
+                f'📊 <b>统计信息</b>\n'
+                f'总客户端数: <code>{total_clients}</code>\n'
+                f'活跃客户端: <code>{active_clients}</code>\n'
+                f'总负载: <code>{total_load}</code>\n'
+                f'平均负载: <code>{avg_load:.1f}</code>\n\n'
+                f'📋 <b>客户端详情</b>\n' +
+                '\n'.join(load_lines) +
+                f'\n⏰ <i>此消息将在60秒后自动删除</i>'
+            )
+        
+        # 发送消息
+        msg = await event.respond(load_msg, parse_mode='html')
+        await auto_delete_message(msg)
+            
+    except Exception as e:
+        log.error(f"显示负载状态失败: {e}", exc_info=True)
+        error_msg = await event.respond(f'❌ 获取负载状态失败: {e}', parse_mode='html')
+        await auto_delete_message(error_msg)
 
 
 @events.register(events.CallbackQuery)
@@ -424,27 +722,31 @@ def get_menu():
     优化的菜单布局
     第一行：任务查看（下载中、等待中、已完成）
     第二行：任务管理（暂停、恢复、删除）
-    第三行：系统功能（系统信息、直链状态）
+    第三行：系统功能（系统信息、直链状态、负载状态）
     第四行：其他功能（清空已完成、刷新菜单、关闭键盘）
     """
     return [
         [
             Button.text('⬇️正在下载', resize=True),
             Button.text('⌛️ 正在等待', resize=True),
-            Button.text('✅ 已完成/停止', resize=True)
+            Button.text('📋 消息队列', resize=True),
         ],
         [
+            Button.text('✅ 已完成/停止', resize=True),
             Button.text('⏸️暂停任务', resize=True),
             Button.text('▶️恢复任务', resize=True),
+        ],
+        [
             Button.text('❌ 删除任务', resize=True),
-        ],
-        [
-            Button.text('📊 系统信息', resize=True),
-            Button.text('🔗 直链状态', resize=True),
-        ],
-        [
             Button.text('🗑️ 清空已完成', resize=True),
+            Button.text('📊 系统信息', resize=True),
+        ],
+        [
+            Button.text('🔗 直链状态', resize=True),
+            Button.text('⚖️ 负载状态', resize=True),
             Button.text('🔄 刷新菜单', resize=True),
+        ],
+        [
             Button.text('❌ 关闭键盘', resize=True),
         ],
     ]
@@ -481,6 +783,46 @@ async def main():
             # 这些警告是正常的速率限制行为，不需要显示
             pyrogram_session_logger = logging.getLogger('pyrogram.session.session')
             pyrogram_session_logger.setLevel(logging.ERROR)  # 只显示 ERROR 及以上级别
+            
+            # 配置 Pyrogram 连接传输日志，降低 BrokenPipeError 警告级别
+            # 这些错误通常是正常的网络波动，Pyrogram 会自动重连
+            pyrogram_transport_logger = logging.getLogger('pyrogram.connection.transport.tcp.tcp')
+            pyrogram_transport_logger.setLevel(logging.ERROR)  # 只显示 ERROR 及以上级别
+            
+            # 过滤 asyncio 的 socket.send() 警告
+            asyncio_logger = logging.getLogger('asyncio')
+            class BrokenPipeFilter(logging.Filter):
+                """过滤 BrokenPipeError 相关的警告"""
+                def filter(self, record):
+                    msg = str(record.getMessage())
+                    if any(keyword in msg for keyword in ['BrokenPipeError', 'Broken pipe', 'socket.send() raised exception']):
+                        # 将警告降级为 DEBUG 级别
+                        record.levelno = logging.DEBUG
+                        record.levelname = 'DEBUG'
+                    return True
+            asyncio_logger.addFilter(BrokenPipeFilter())
+            
+            # 过滤 Pyrogram 加密相关的错误（客户端断开连接时的已知问题）
+            class EncryptionErrorFilter(logging.Filter):
+                """过滤 Pyrogram 加密状态异常的错误，这些通常在客户端断开连接时发生"""
+                def filter(self, record):
+                    msg = str(record.getMessage())
+                    # 过滤加密相关的 TypeError（Value after * must be an iterable）
+                    if any(keyword in msg for keyword in [
+                        'Value after * must be an iterable',
+                        'not NoneType',
+                        'Task exception was never retrieved',
+                        'handle_packet',
+                        'ctr256_encrypt'
+                    ]):
+                        # 检查是否是加密相关的错误
+                        if 'encrypt' in msg.lower() or 'NoneType' in msg:
+                            # 将错误降级为 DEBUG 级别，不显示在日志中
+                            # 这个错误会在健康检查时自动修复
+                            record.levelno = logging.DEBUG
+                            record.levelname = 'DEBUG'
+                    return True
+            asyncio_logger.addFilter(EncryptionErrorFilter())
             
             if not Var or not Var.BIN_CHANNEL:
                 log.warning('BIN_CHANNEL未配置，直链功能可能无法正常工作')
@@ -602,9 +944,27 @@ async def main():
                 
                 stream_server = web.AppRunner(web_server())
                 await stream_server.setup()
-                site = web.TCPSite(stream_server, Var.BIND_ADDRESS, Var.PORT)
-                await site.start()
-                log.info(f'Web服务器启动成功: {Var.URL}')
+                
+                # 支持IPv6双栈：如果绑定地址是0.0.0.0，同时绑定IPv6
+                if Var.BIND_ADDRESS == "0.0.0.0":
+                    # 同时绑定IPv4和IPv6，实现双栈支持
+                    try:
+                        site_ipv4 = web.TCPSite(stream_server, "0.0.0.0", Var.PORT)
+                        site_ipv6 = web.TCPSite(stream_server, "::", Var.PORT)
+                        await site_ipv4.start()
+                        await site_ipv6.start()
+                        log.info(f'Web服务器启动成功（IPv4+IPv6双栈）: {Var.URL}')
+                    except OSError as e:
+                        # 如果IPv6绑定失败（系统不支持IPv6），回退到仅IPv4
+                        log.warning(f'IPv6绑定失败，仅使用IPv4: {e}')
+                        site_ipv4 = web.TCPSite(stream_server, "0.0.0.0", Var.PORT)
+                        await site_ipv4.start()
+                        log.info(f'Web服务器启动成功（仅IPv4）: {Var.URL}')
+                else:
+                    # 使用指定的绑定地址
+                    site = web.TCPSite(stream_server, Var.BIND_ADDRESS, Var.PORT)
+                    await site.start()
+                    log.info(f'Web服务器启动成功: {Var.URL}')
             
             auto_download_status = "启用" if (Var and Var.AUTO_DOWNLOAD) else "禁用"
             log.info(f'直链功能已启用，将作为Telegram媒体文件的前置处理')
@@ -620,9 +980,17 @@ async def cleanup():
         await stream_server.cleanup()
     if ENABLE_STREAM:
         try:
-            await StreamBot.stop()
-        except:
-            pass
+            # 停止所有客户端（包括多客户端模式下的额外客户端）
+            from WebStreamer.bot import multi_clients
+            for index, client in multi_clients.items():
+                try:
+                    if client and client.is_connected:
+                        await client.stop()
+                        log.info(f"客户端 {index} 已停止")
+                except Exception as e:
+                    log.warning(f"停止客户端 {index} 时出错: {e}")
+        except Exception as e:
+            log.warning(f"清理客户端时出错: {e}")
 
 
 loop = asyncio.get_event_loop()

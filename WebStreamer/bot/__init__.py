@@ -32,4 +32,6 @@ StreamBot = Client(
 
 multi_clients = {}
 work_loads = {}
+# 跟踪哪些客户端可以访问 BIN_CHANNEL
+channel_accessible_clients = set()
 
