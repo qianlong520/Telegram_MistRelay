@@ -257,9 +257,7 @@ docker compose logs -f
 
 ## 三、应用截图
 
-/help 查看帮助
-
-![img.png](./img.png)
+使用 `/help` 命令查看帮助信息和功能列表。
 
 ## 四、致谢
 
