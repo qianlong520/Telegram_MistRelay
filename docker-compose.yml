@@ -1,0 +1,26 @@
+services:
+  mistrelay:
+    build: 
+      context: .
+      # 如果构建时遇到DNS问题，可以在构建时设置DNS
+      # 注意：build阶段的DNS需要在Docker daemon级别配置，或使用build args
+    container_name: mistrelay
+    restart: unless-stopped
+    network_mode: host
+    privileged: true # 允许读取系统硬件信息（用于dashboard监控）
+    # DNS配置（运行时）
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 114.114.114.114
+    volumes:
+      - ./db:/app/db  # 数据库和配置文件目录（持久化）
+      - ./downloads:/root/downloads  # 下载目录（可根据需要修改）
+      - ./rclone:/root/.config/rclone  # rclone配置目录
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket（用于系统管理模块控制容器，需要root权限）
+    environment:
+      - TZ=Asia/Shanghai
+    # 如果需要直链功能，需要映射Web服务器端口（默认8080）
+    # 如果使用network_mode: host，则不需要ports映射
+    # ports:
+    #   - "8080:8080"  # 直链Web服务器端口（如果启用直链功能）

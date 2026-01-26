@@ -1,0 +1,13 @@
+# 忽略所有rclone配置文件
+rclone.conf
+*.conf
+
+# 忽略数据库文件
+db/downloads.db
+*.db
+
+# 忽略前端构建产物
+web/dist/
+web/node_modules/
+web/.vite/
+web/*.log
