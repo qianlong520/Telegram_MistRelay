@@ -264,10 +264,34 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                             # 如果无法检查状态，假设成功
                             return True
                 
+                # 动态获取配置值
+                from configer import get_config_value
+                skip_small_files = get_config_value('SKIP_SMALL_FILES', False)
+                min_file_size_mb = get_config_value('MIN_FILE_SIZE_MB', 100)
+                min_size_bytes = min_file_size_mb * 1024 * 1024 if skip_small_files else 0
+                
                 for i, link in enumerate(download_links):
                     retry_count = 0
                     max_retries = 3
                     added_successfully = False
+                    
+                    # 检查文件大小（在添加下载任务之前）
+                    if skip_small_files:
+                        try:
+                            original_msg = forwarded_messages[i][0] if i < len(forwarded_messages) else first_msg
+                            if original_msg and original_msg.media:
+                                media = getattr(original_msg, original_msg.media.value, None)
+                                if media:
+                                    file_size = getattr(media, 'file_size', None)
+                                    if file_size and file_size > 0 and file_size < min_size_bytes:
+                                        file_name = getattr(media, 'file_name', None) or f"文件{i+1}"
+                                        size_mb = file_size / 1024 / 1024
+                                        logger.info(f"[跳过小文件] 媒体组文件 {file_name} 大小 {file_size} 字节 ({size_mb:.2f}MB) 小于 {min_file_size_mb}MB，静默跳过下载")
+                                        # 跳过这个文件，继续处理下一个（静默处理，不发送通知）
+                                        continue
+                        except Exception as e:
+                            logger.error(f"检查文件大小失败: {e}")
+                            # 如果检查失败，继续添加下载任务
                     
                     while retry_count <= max_retries and not added_successfully:
                         try:
@@ -454,13 +478,32 @@ async def process_single_media(m: Message, queue_reply_msg=None):
             
             if is_admin:
                 try:
+                    # 检查文件大小（在添加下载任务之前）
+                    media = m.document or m.video or m.audio or m.photo or m.animation
+                    file_size = getattr(media, 'file_size', None) if media else None
+                    
+                    # 动态获取配置值
+                    from configer import get_config_value
+                    skip_small_files = get_config_value('SKIP_SMALL_FILES', False)
+                    min_file_size_mb = get_config_value('MIN_FILE_SIZE_MB', 100)
+                    
+                    # 如果启用了跳过小文件功能，且文件大小已知且小于限制，则跳过
+                    if skip_small_files and file_size and file_size > 0:
+                        min_size_bytes = min_file_size_mb * 1024 * 1024
+                        if file_size < min_size_bytes:
+                            file_name = getattr(media, 'file_name', None) or get_name(m) or '未知文件'
+                            size_mb = file_size / 1024 / 1024
+                            logger.info(f"[跳过小文件] 文件 {file_name} 大小 {file_size} 字节 ({size_mb:.2f}MB) 小于 {min_file_size_mb}MB，静默跳过下载")
+                            # 不添加到下载队列，但继续执行后续逻辑（返回直链等）（静默处理，不发送通知）
+                            download_added = False
+                            task_gid = None
+                    
                     # 将直链URL添加到aria2下载队列
                     result = await aria2_client.add_uri(uris=[stream_link])
                     if result and 'result' in result:
                         task_gid = result.get('result')
                         # 记录 Telegram 媒体与下载任务到数据库
                         try:
-                            media = m.document or m.video or m.audio or m.photo or m.animation
                             if media:
                                 file_unique_id = save_tg_media(m, media)
                                 create_download(file_unique_id, task_gid, stream_link)

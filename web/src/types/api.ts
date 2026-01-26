@@ -11,10 +11,11 @@ export interface DownloadRecord {
   id: number
   gid?: string
   source_url?: string
-  status: 'pending' | 'downloading' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped'
   total_length?: number
   completed_length?: number
   download_speed?: number
+  error_message?: string
   local_path?: string
   remote_path?: string
   upload_status?: string
@@ -46,6 +47,7 @@ export interface DownloadGroup {
     downloading: number
     failed: number
     pending: number
+    skipped?: number
     total_size: number
     completed_size: number
   }

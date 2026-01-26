@@ -444,6 +444,8 @@ def fetch_downloads_grouped(limit: int = 100):
         downloading = sum(1 for d in downloads if d.get('status') == 'downloading')
         failed = sum(1 for d in downloads if d.get('status') == 'failed')
         pending = sum(1 for d in downloads if d.get('status') == 'pending')
+        # 统计跳过的文件（状态为failed且错误信息包含"跳过"）
+        skipped = sum(1 for d in downloads if d.get('status') == 'failed' and d.get('error_message', '').find('跳过') != -1)
         
         total_size = sum(d.get('total_length') or d.get('file_size') or 0 for d in downloads)
         completed_size = sum(d.get('completed_length') or 0 for d in downloads)
@@ -463,6 +465,7 @@ def fetch_downloads_grouped(limit: int = 100):
                 'downloading': downloading,
                 'failed': failed,
                 'pending': pending,
+                'skipped': skipped,
                 'total_size': total_size,
                 'completed_size': completed_size
             },
@@ -589,6 +592,8 @@ def init_config_from_yaml():
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
             'PROXY_IP': ('string', 'download', '代理IP'),
             'PROXY_PORT': ('string', 'download', '代理端口'),
+            'SKIP_SMALL_FILES': ('bool', 'download', '是否跳过小于指定大小的媒体文件'),
+            'MIN_FILE_SIZE_MB': ('int', 'download', '最小文件大小（MB），小于此大小的文件将被跳过'),
             
             # Aria2配置
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),

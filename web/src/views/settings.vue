@@ -90,6 +90,27 @@
             <el-form-item label="代理端口">
               <el-input v-model="configs.download.PROXY_PORT" placeholder="留空则不使用代理" />
             </el-form-item>
+            <el-divider />
+            <el-form-item label="跳过小文件">
+              <el-switch v-model="configs.download.SKIP_SMALL_FILES" />
+              <div class="el-form-item__help">
+                启用后，小于指定大小的媒体文件将不会被下载
+              </div>
+            </el-form-item>
+            <el-form-item 
+              label="最小文件大小（MB）" 
+              v-if="configs.download.SKIP_SMALL_FILES"
+            >
+              <el-input-number 
+                v-model="configs.download.MIN_FILE_SIZE_MB" 
+                :min="1" 
+                :max="10000" 
+                style="width: 100%" 
+              />
+              <div class="el-form-item__help">
+                小于此大小的文件将被跳过下载（默认：100MB）
+              </div>
+            </el-form-item>
           </el-form>
         </el-card>
       </el-tab-pane>
@@ -218,7 +239,9 @@ const configs = ref({
   download: {
     SAVE_PATH: '/root/mistrelay_downloads',
     PROXY_IP: '',
-    PROXY_PORT: ''
+    PROXY_PORT: '',
+    SKIP_SMALL_FILES: false,
+    MIN_FILE_SIZE_MB: 100
   },
   aria2: {
     RPC_SECRET: '',

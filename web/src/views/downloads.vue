@@ -60,6 +60,9 @@
                       <el-tag v-if="group.stats.downloading > 0" size="small" type="warning">
                         {{ group.stats.downloading }} 下载中
                       </el-tag>
+                      <el-tag v-if="(group.stats.skipped || 0) > 0" size="small" type="info">
+                        {{ group.stats.skipped }} 已跳过
+                      </el-tag>
                       <el-tag v-if="group.stats.failed > 0" size="small" type="danger">
                         {{ group.stats.failed }} 失败
                       </el-tag>
@@ -96,11 +99,23 @@
                   </template>
                 </el-table-column>
                 
-                <el-table-column label="状态" width="100">
+                <el-table-column label="状态" width="120">
                   <template #default="{ row }">
-                    <el-tag :type="getStatusTagType(row.status)" size="small">
-                      {{ getStatusText(row.status) }}
+                    <el-tag 
+                      :type="getStatusTagTypeWithSkip(row.status, row.error_message)" 
+                      size="small"
+                    >
+                      {{ getStatusTextWithSkip(row.status, row.error_message) }}
                     </el-tag>
+                    <el-tooltip 
+                      v-if="row.status === 'failed' && row.error_message && row.error_message.includes('跳过')"
+                      :content="row.error_message"
+                      placement="top"
+                    >
+                      <el-icon class="ml-1 cursor-pointer" style="color: #909399">
+                        <InfoFilled />
+                      </el-icon>
+                    </el-tooltip>
                   </template>
                 </el-table-column>
                 
@@ -172,7 +187,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Files, Document, VideoPause, VideoPlay, Delete } from '@element-plus/icons-vue'
+import { Refresh, Files, Document, VideoPause, VideoPlay, Delete, InfoFilled } from '@element-plus/icons-vue'
 import { useIntervalFn } from '@vueuse/core'
 import { getDownloads } from '@/api'
 import type { DownloadGroup } from '@/types/api'
@@ -183,6 +198,21 @@ import {
   getStatusText,
   getStatusTagType
 } from '@/utils/formatters'
+
+// 扩展状态文本和标签类型函数，支持跳过状态
+function getStatusTextWithSkip(status?: string, errorMessage?: string): string {
+  if (status === 'failed' && errorMessage && errorMessage.includes('跳过')) {
+    return '已跳过'
+  }
+  return getStatusText(status)
+}
+
+function getStatusTagTypeWithSkip(status?: string, errorMessage?: string): 'success' | 'warning' | 'danger' | 'info' {
+  if (status === 'failed' && errorMessage && errorMessage.includes('跳过')) {
+    return 'info'
+  }
+  return getStatusTagType(status)
+}
 
 const groups = ref<DownloadGroup[]>([])
 const isLoading = ref(true)
@@ -225,7 +255,9 @@ function getGroupProgress(stats: DownloadGroup['stats']): number {
 }
 
 function getGroupStatus(stats: DownloadGroup['stats']): 'success' | 'exception' | 'warning' {
-  if (stats.failed > 0) return 'exception'
+  // 如果只有跳过的文件，不算异常
+  const realFailed = (stats.failed || 0) - (stats.skipped || 0)
+  if (realFailed > 0) return 'exception'
   if (stats.downloading > 0 || stats.pending > 0) return 'warning'
   return 'success'
 }

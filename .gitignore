@@ -1,46 +1,148 @@
-# 忽略所有rclone配置文件
-rclone.conf
+# ============================================================================
+# 敏感配置文件 - 包含密钥、Token等敏感信息
+# ============================================================================
+
+# 数据库配置文件（包含API密钥、Token等）
+# 重要：示例文件（*.example.yml, *.yml.example）应该被提交，不被忽略
+# 必须在忽略规则之前明确排除示例文件
+!db/config.yml.example
+!db/config.example.yml
+!db/*.example.yml
+!db/*.yml.example
+# 然后忽略所有其他yml文件
+db/config.yml
+db/*.yml
+
+# Rclone配置文件（包含OneDrive等云存储密钥）
+# 重要：示例文件（*.conf.example）应该被提交，不被忽略
+# 必须在忽略规则之前明确排除示例文件
+!rclone/rclone.conf.example
+!rclone/*.conf.example
+# 然后忽略所有其他conf文件
+rclone/rclone.conf
+rclone/*.conf
 *.conf
 
-# 忽略数据库文件
-db/downloads.db
-db/downloads.db-shm
-db/downloads.db-wal
-db/bot.session
-db/bot.session-journal
-db/config.yml
-*.db
-*.db-shm
-*.db-wal
-
-# 忽略前端构建产物
-web/dist/
-web/node_modules/
-web/.vite/
-web/*.log
-
-# 忽略Python缓存
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# 忽略IDE配置
-.cursor/
-.vscode/
-.idea/
-
-# 忽略临时文件
-*.log
-*.tmp
-downloads/*
-!downloads/.gitkeep
-
-# 忽略环境变量文件
+# 环境变量文件
 .env
 .env.*
 !.env.example
+
+# 密钥和证书文件
 *.key
 *.pem
 *.p12
 *.pfx
+*.crt
+*.cer
+*.jks
+
+# ============================================================================
+# 数据库文件
+# ============================================================================
+
+# SQLite数据库文件
+db/downloads.db
+db/downloads.db-shm
+db/downloads.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Telegram会话文件（包含登录凭证）
+db/bot.session
+db/bot.session-journal
+db/*.session
+db/*.session-journal
+*.session
+*.session-journal
+
+# ============================================================================
+# 日志文件
+# ============================================================================
+
+# 所有日志文件
+*.log
+*.log.*
+logs/
+log/
+rclone.log
+/app/rclone.log
+
+# ============================================================================
+# 前端构建产物
+# ============================================================================
+
+web/dist/
+web/node_modules/
+web/.vite/
+web/*.log
+web/.env
+web/.env.local
+web/.env.*.local
+
+# ============================================================================
+# Python缓存和临时文件
+# ============================================================================
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ============================================================================
+# IDE和编辑器配置
+# ============================================================================
+
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================================================
+# 下载和临时文件
+# ============================================================================
+
+downloads/*
+!downloads/.gitkeep
+*.tmp
+*.temp
+*.cache
+
+# ============================================================================
+# Docker相关
+# ============================================================================
+
+docker-compose.override.yml
+.dockerignore.local
+
+# ============================================================================
+# 其他敏感文件
+# ============================================================================
+
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 压缩文件（可能包含敏感信息）
+*.zip
+*.tar.gz
+*.rar
+!web/dist/*.zip  # 允许前端构建的zip
+
+# 系统文件
+Thumbs.db
+.DS_Store

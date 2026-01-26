@@ -26,7 +26,8 @@ from .constants import (
     channel_accessible_clients,
     upload_work_loads
 )
-from .utils import parse_rclone_progress, format_upload_message
+from .utils import parse_rclone_progress, format_upload_message, run_rclone_command
+
 
 
 class UploadHandler:
@@ -43,6 +44,122 @@ class UploadHandler:
         self.bot = bot
         self.progress_cache = progress_cache
     
+    async def verify_onedrive_upload(self, file_path, remote_path):
+        """
+        校验OneDrive上传是否成功
+        
+        Args:
+            file_path: 本地文件路径
+            remote_path: 远程路径(格式: remote:path)
+        
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        from .utils import run_rclone_command
+        
+        file_name = os.path.basename(file_path)
+        remote_file = f"{remote_path}/{file_name}"
+        
+        try:
+            # 1. 检查文件是否存在
+            print(f"[校验] 检查远程文件: {remote_file}")
+            from .utils import run_rclone_command_async
+            returncode, stdout, stderr = await run_rclone_command_async(['lsf', remote_file], timeout=30)
+            
+            if returncode != 0:
+                error_msg = f"远程文件不存在或无法访问"
+                print(f"[校验] {error_msg}")
+                print(f"[校验] stderr: {stderr}")
+                return False, error_msg
+            
+            # 2. 获取远程文件大小
+            print(f"[校验] 获取远程文件大小")
+            returncode, stdout, stderr = run_rclone_command(
+                ['lsf', '--format', 's', remote_file], 
+                timeout=30
+            )
+            
+            if returncode != 0:
+                error_msg = f"无法获取远程文件大小"
+                print(f"[校验] {error_msg}")
+                print(f"[校验] stderr: {stderr}")
+                return False, error_msg
+            
+            try:
+                remote_size = int(stdout.strip())
+            except ValueError:
+                error_msg = f"远程文件大小格式错误: {stdout}"
+                print(f"[校验] {error_msg}")
+                return False, error_msg
+            
+            # 3. 对比本地和远程文件大小
+            if not os.path.exists(file_path):
+                error_msg = f"本地文件不存在(可能已被删除)"
+                print(f"[校验] {error_msg}")
+                # 如果本地文件已删除但远程文件存在,认为上传成功
+                return True, "本地文件已删除,但远程文件存在"
+            
+            local_size = os.path.getsize(file_path)
+            
+            if remote_size != local_size:
+                error_msg = f"文件大小不匹配: 本地{byte2_readable(local_size)}, 远程{byte2_readable(remote_size)}"
+                print(f"[校验] {error_msg}")
+                return False, error_msg
+            
+            print(f"[校验] 文件大小匹配: {byte2_readable(remote_size)}")
+            
+            # 4. MD5哈希校验(可选,提供更强的完整性保证)
+            try:
+                from .utils import calculate_file_md5
+                
+                # 计算本地文件MD5
+                print(f"[校验] 计算本地文件MD5...")
+                local_md5 = calculate_file_md5(file_path)
+                
+                if local_md5:
+                    # 获取远程文件MD5
+                    print(f"[校验] 获取远程文件MD5...")
+                    returncode, stdout, stderr = await run_rclone_command_async(
+                        ['md5sum', remote_file],
+                        timeout=60  # MD5计算可能需要更长时间
+                    )
+                    
+                    if returncode == 0 and stdout.strip():
+                        # rclone md5sum输出格式: "md5hash filename"
+                        remote_md5 = stdout.strip().split()[0].lower()
+                        
+                        if local_md5 != remote_md5:
+                            error_msg = f"MD5不匹配: 本地{local_md5}, 远程{remote_md5}"
+                            print(f"[校验] {error_msg}")
+                            return False, error_msg
+                        
+                        print(f"[校验] MD5匹配: {local_md5}")
+                        success_msg = f"校验成功(大小+MD5): {byte2_readable(remote_size)}"
+                        print(f"[校验] {success_msg}")
+                        return True, success_msg
+                    else:
+                        # 如果无法获取远程MD5,仅依赖大小校验
+                        print(f"[校验] 无法获取远程MD5,仅使用大小校验")
+                        print(f"[校验] stderr: {stderr}")
+                else:
+                    print(f"[校验] 无法计算本地MD5,仅使用大小校验")
+                    
+            except Exception as md5_error:
+                # MD5校验失败不影响整体校验,降级为仅大小校验
+                print(f"[校验] MD5校验出错(降级为大小校验): {md5_error}")
+            
+            # 校验成功(仅大小)
+            success_msg = f"校验成功(大小): {byte2_readable(remote_size)}"
+            print(f"[校验] {success_msg}")
+            return True, success_msg
+            
+        except Exception as e:
+            error_msg = f"校验过程出错: {str(e)}"
+            print(f"[校验] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return False, error_msg
+
     async def upload_to_onedrive(self, file_path, msg=None, gid=None, upload_id=None):
         """
         使用rclone将文件上传到OneDrive
@@ -172,23 +289,32 @@ class UploadHandler:
                     await asyncio.sleep(wait_seconds)
                     
                 
-                # 执行rclone命令
+                # 执行rclone命令（使用异步subprocess避免阻塞事件循环）
                 process = None
                 try:
-                    process = subprocess.Popen(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        universal_newlines=True
+                    process = await asyncio.create_subprocess_exec(
+                        *command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT
                     )
                     
-                    # 读取输出并更新进度
+                    # 读取输出并更新进度（异步读取）
                     last_progress = ""
                     last_message_text = ""
                     progress_counter = 0
                     error_lines = []
                     
-                    for line in process.stdout:
+                    # 异步读取stdout，避免阻塞事件循环
+                    while True:
+                        line_bytes = await process.stdout.readline()
+                        if not line_bytes:
+                            break
+                        
+                        try:
+                            line = line_bytes.decode('utf-8', errors='replace')
+                        except:
+                            line = line_bytes.decode('latin-1', errors='replace')
+                        
                         # 收集错误日志
                         if "ERROR" in line:
                             error_lines.append(line.strip())
@@ -221,9 +347,8 @@ class UploadHandler:
                                             if "not modified" not in str(e).lower():
                                                 print(f"更新上传进度消息失败: {e}")
                     
-                    # 等待进程完成
-                    process.wait()
-                    last_return_code = process.returncode
+                    # 等待进程完成（异步等待）
+                    last_return_code = await process.wait()
                     if error_lines:
                         last_error_details = "\n".join(error_lines[-10:])
                     
@@ -239,23 +364,165 @@ class UploadHandler:
                         current_retry += 1
                 finally:
                     # 确保进程被正确清理,防止僵尸进程
-                    if process and process.poll() is None:
+                    # 注意：asyncio.subprocess.Process 使用 returncode 而不是 poll()
+                    if process and process.returncode is None:
                         try:
                             process.terminate()
-                            process.wait(timeout=PROCESS_TERMINATE_TIMEOUT)
+                            try:
+                                await asyncio.wait_for(process.wait(), timeout=PROCESS_TERMINATE_TIMEOUT)
+                            except asyncio.TimeoutError:
+                                process.kill()
+                                await process.wait()
                         except:
                             try:
                                 process.kill()
+                                await process.wait()
                             except:
                                 pass
             
             # 循环结束，检查最终结果
+            if upload_success:
+                # 校验OneDrive上传
+                print(f"[上传] rclone返回成功,开始校验远程文件...")
+                
+                # 校验失败时的重试机制
+                max_verify_retries = 2  # 最多重试2次(总共3次尝试)
+                verify_retry_count = 0
+                verify_success = False
+                verify_msg = ""
+                
+                while verify_retry_count <= max_verify_retries:
+                    if verify_retry_count > 0:
+                        print(f"[校验] 第 {verify_retry_count} 次重试校验...")
+                        
+                        # 通知用户正在重试
+                        if self.bot and msg:
+                            try:
+                                retry_message = (
+                                    f'🔄 \u003cb\u003e校验失败,正在重试\u003c/b\u003e\\n\\n'
+                                    f'📁 \u003cb\u003e文件:\u003c/b\u003e \u003ccode\u003e{file_name}\u003c/code\u003e\\n'
+                                    f'📂 \u003cb\u003e路径:\u003c/b\u003e \u003ccode\u003e{file_path}\u003c/code\u003e\\n\\n'
+                                    f'⚠️ \u003cb\u003e上次校验失败:\u003c/b\u003e {verify_msg}\\n'
+                                    f'🔄 \u003cb\u003e重试次数:\u003c/b\u003e {verify_retry_count}/{max_verify_retries}\\n\\n'
+                                    f'⏳ 正在删除远程文件并重新上传...'
+                                )
+                                await self.bot.edit_message(msg, retry_message, parse_mode='html')
+                            except Exception as e:
+                                if "not modified" not in str(e).lower():
+                                    print(f"更新重试消息失败: {e}")
+                        
+                        # 删除远程文件
+                        try:
+                            remote_file = f"{RCLONE_REMOTE}:{RCLONE_PATH}/{file_name}"
+                            print(f"[重试] 删除远程文件: {remote_file}")
+                            from .utils import run_rclone_command_async
+                            returncode, stdout, stderr = await run_rclone_command_async(
+                                ['deletefile', remote_file],
+                                timeout=30
+                            )
+                            if returncode == 0:
+                                print(f"[重试] 远程文件已删除")
+                            else:
+                                print(f"[重试] 删除远程文件失败(可能不存在): {stderr}")
+                        except Exception as del_e:
+                            print(f"[重试] 删除远程文件出错: {del_e}")
+                        
+                        # 等待一段时间再重试
+                        await asyncio.sleep(5)
+                        
+                        # 重新上传
+                        print(f"[重试] 开始重新上传...")
+                        remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}"
+                        command = [
+                            "rclone", 
+                            "copy", 
+                            file_path, 
+                            remote_path, 
+                            "-P",
+                            "--transfers", "4",
+                            "--checkers", "8",
+                            "--buffer-size", "64M",
+                            "--log-level", "INFO",
+                            "--log-file", "/app/rclone.log"
+                        ]
+                        
+                        try:
+                            process = await asyncio.create_subprocess_exec(
+                                *command,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.STDOUT
+                            )
+                            
+                            # 等待上传完成（异步等待）
+                            returncode = await process.wait()
+                            
+                            if returncode != 0:
+                                print(f"[重试] 重新上传失败,返回码: {process.returncode}")
+                                verify_retry_count += 1
+                                verify_msg = f"重新上传失败,返回码: {process.returncode}"
+                                continue
+                            
+                            print(f"[重试] 重新上传完成")
+                            
+                        except Exception as upload_e:
+                            print(f"[重试] 重新上传出错: {upload_e}")
+                            verify_retry_count += 1
+                            verify_msg = f"重新上传出错: {upload_e}"
+                            continue
+                    
+                    # 执行校验
+                    verify_success, verify_msg = await self.verify_onedrive_upload(
+                        file_path, 
+                        f"{RCLONE_REMOTE}:{RCLONE_PATH}"
+                    )
+                    
+                    if verify_success:
+                        print(f"[校验] 校验成功: {verify_msg}")
+                        break
+                    else:
+                        print(f"[校验] 校验失败: {verify_msg}")
+                        verify_retry_count += 1
+                
+                # 检查最终校验结果
+                if not verify_success:
+                    print(f"[上传] OneDrive校验失败(已重试{verify_retry_count}次): {verify_msg}")
+                    upload_success = False
+                    last_error_details = f"校验失败(重试{verify_retry_count}次): {verify_msg}"
+                    
+                    # 更新错误信息
+                    if upload_id:
+                        try:
+                            mark_upload_failed(upload_id, 'verification_failed', f"{verify_msg} (重试{verify_retry_count}次)")
+                        except Exception as e:
+                            print(f"标记校验失败出错: {e}")
+                    
+                    # 通知用户校验失败
+                    if self.bot and msg:
+                        try:
+                            verify_fail_message = (
+                                f'❌ \u003cb\u003e上传校验失败\u003c/b\u003e\\n\\n'
+                                f'📁 \u003cb\u003e文件:\u003c/b\u003e \u003ccode\u003e{file_name}\u003c/code\u003e\\n'
+                                f'📂 \u003cb\u003e路径:\u003c/b\u003e \u003ccode\u003e{file_path}\u003c/code\u003e\\n\\n'
+                                f'❌ \u003cb\u003e校验结果:\u003c/b\u003e {verify_msg}\\n'
+                                f'🔄 \u003cb\u003e重试次数:\u003c/b\u003e {verify_retry_count}次\\n\\n'
+                                f'💡 \u003cb\u003e说明:\u003c/b\u003e 已自动重试{verify_retry_count}次但仍然失败,本地文件已保留'
+                            )
+                            await self.bot.edit_message(msg, verify_fail_message, parse_mode='html')
+                        except Exception as e:
+                            if "not modified" not in str(e).lower():
+                                print(f"更新校验失败消息失败: {e}")
+                else:
+                    print(f"[上传] OneDrive校验成功: {verify_msg}")
+
+            
+            # 最终上传成功(包含校验通过)
             if upload_success:
                 if upload_id:
                     try:
                         mark_upload_completed(upload_id)
                     except Exception as e:
                         print(f"标记上传完成出错: {e}")
+
                         
                 if self.bot and msg:
                     try:
@@ -367,7 +634,7 @@ class UploadHandler:
                     # 尝试读取日志文件中的最后几行错误
                     try:
                         if os.path.exists("/app/rclone.log"):
-                            with open("/app/rclone.log", "r") as log_file:
+                            with open("/app/rclone.log", "r", encoding="utf-8", errors="replace") as log_file:
                                 log_lines = log_file.readlines()
                                 last_errors = [line for line in log_lines[-20:] if "ERROR" in line]
                                 if last_errors:

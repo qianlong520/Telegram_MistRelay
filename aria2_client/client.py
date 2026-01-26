@@ -37,13 +37,18 @@ class AsyncAria2Client:
         self.download_messages = {}  # 存储每个下载任务的消息对象
         self.completed_gids = set()  # 记录已完成的GID，防止重复处理
         
+        # 轮询相关
+        self.polling_task = None  # 轮询任务
+        self.is_polling = False   # 轮询状态标志
+        
         # 初始化处理器
         self.upload_handler = UploadHandler(bot, self.progress_cache)
         self.download_handler = DownloadHandler(
             bot, 
             self.download_messages, 
             self.completed_gids,
-            self.upload_handler
+            self.upload_handler,
+            self  # 传递客户端实例，用于移除任务
         )
 
     async def connect(self):
@@ -70,6 +75,9 @@ class AsyncAria2Client:
             self.websocket = await websockets.connect(full_ws_url, ping_interval=30)
             print("WebSocket连接成功")
             asyncio.ensure_future(self.listen())
+            
+            # 启动轮询任务
+            await self.start_polling()
         except Exception as e:
             print(f"WebSocket连接失败: {e}")
             await self.re_connect()
@@ -97,6 +105,8 @@ class AsyncAria2Client:
                         await self.download_handler.on_download_pause(result, self.tell_status)
         except websockets.exceptions.ConnectionClosedError:
             print("WebSocket连接已关闭")
+            # 停止轮询
+            await self.stop_polling()
             await self.re_connect()
 
     def parse_json_to_str(self, method, params):
@@ -282,3 +292,163 @@ class AsyncAria2Client:
         rpc_body = self.get_rpc_body('aria2.getGlobalOption')
         data = await self.post_body(rpc_body)
         return data['result']
+
+    async def start_polling(self):
+        """启动轮询任务"""
+        if self.is_polling:
+            print("[轮询] 轮询任务已在运行")
+            return
+        
+        self.is_polling = True
+        self.polling_task = asyncio.create_task(self.poll_active_downloads())
+        print("[轮询] 已启动轮询任务")
+    
+    async def stop_polling(self):
+        """停止轮询任务"""
+        self.is_polling = False
+        if self.polling_task:
+            self.polling_task.cancel()
+            try:
+                await self.polling_task
+            except asyncio.CancelledError:
+                pass
+            self.polling_task = None
+        print("[轮询] 已停止轮询任务")
+    
+    async def poll_active_downloads(self):
+        """
+        轮询活动下载任务的核心逻辑
+        定期查询aria2活动任务并同步状态
+        """
+        from .constants import POLL_INTERVAL, IDLE_CHECK_INTERVAL
+        
+        print("[轮询] 开始轮询循环")
+        
+        while self.is_polling:
+            try:
+                # 获取所有活动任务
+                active_tasks = await self.tell_active()
+                
+                # 获取最近停止的任务(可能是快速完成的小文件)
+                stopped_tasks = await self.tell_stopped(0, 20)
+                
+                # 获取等待中的任务
+                waiting_tasks = await self.tell_waiting(0, 10)
+                
+                total_tasks = len(active_tasks) + len(stopped_tasks) + len(waiting_tasks)
+                
+                if total_tasks > 0:
+                    print(f"[轮询] 发现任务 - 活动: {len(active_tasks)}, 已停止: {len(stopped_tasks)}, 等待: {len(waiting_tasks)}")
+                    
+                    # 遍历活动任务
+                    for task in active_tasks:
+                        gid = task.get('gid')
+                        if not gid:
+                            continue
+                        await self.sync_download_status(gid, task)
+                    
+                    # 遍历已停止的任务(可能是complete/error)
+                    for task in stopped_tasks:
+                        gid = task.get('gid')
+                        if not gid:
+                            continue
+                        # 只处理未记录在completed_gids中的任务
+                        if gid not in self.completed_gids:
+                            await self.sync_download_status(gid, task)
+                    
+                    # 遍历等待中的任务
+                    for task in waiting_tasks:
+                        gid = task.get('gid')
+                        if not gid:
+                            continue
+                        await self.sync_download_status(gid, task)
+                    
+                    # 有任务时使用正常轮询间隔
+                    await asyncio.sleep(POLL_INTERVAL)
+                else:
+                    print("[轮询] 无任务,使用空闲检查间隔")
+                    # 无任务时使用较长的检查间隔
+                    await asyncio.sleep(IDLE_CHECK_INTERVAL)
+                    
+            except asyncio.CancelledError:
+                print("[轮询] 轮询任务被取消")
+                break
+            except Exception as e:
+                print(f"[轮询] 轮询过程出错: {e}")
+                import traceback
+                traceback.print_exc()
+                # 出错后等待一段时间再继续
+                await asyncio.sleep(POLL_INTERVAL)
+        
+        print("[轮询] 轮询循环结束")
+    
+    async def sync_download_status(self, gid: str, aria2_status: dict):
+        """
+        同步单个下载任务的状态
+        
+        Args:
+            gid: 任务GID
+            aria2_status: aria2返回的任务状态信息
+        """
+        try:
+            status = aria2_status.get('status')
+            
+            # 检查是否已经处理过完成状态
+            if gid in self.completed_gids:
+                # 已处理过,跳过
+                return
+            
+            print(f"[同步] 任务 {gid[:8]}... 状态: {status}")
+            
+            # 根据aria2状态触发相应处理
+            if status == 'active':
+                # 任务正在下载
+                # 检查是否有对应的消息对象,如果没有说明可能错过了开始事件
+                if gid not in self.download_messages:
+                    print(f"[同步] 检测到活动任务 {gid[:8]}... 但无消息记录,触发开始事件")
+                    # 构造事件结构并触发开始处理
+                    event = {
+                        'method': 'aria2.onDownloadStart',
+                        'params': [{'gid': gid}]
+                    }
+                    await self.download_handler.on_download_start(event, self.tell_status)
+                # 如果有消息对象,进度更新由WebSocket通知处理,轮询不重复更新
+                
+            elif status == 'waiting':
+                # 任务等待中
+                if gid not in self.download_messages:
+                    print(f"[同步] 检测到等待任务 {gid[:8]}...,触发开始事件")
+                    event = {
+                        'method': 'aria2.onDownloadStart',
+                        'params': [{'gid': gid}]
+                    }
+                    await self.download_handler.on_download_start(event, self.tell_status)
+                
+            elif status == 'complete':
+                # 任务已完成
+                print(f"[同步] ✅ 检测到任务 {gid[:8]}... 已完成,触发完成事件")
+                event = {
+                    'method': 'aria2.onDownloadComplete',
+                    'params': [{'gid': gid}]
+                }
+                await self.download_handler.on_download_complete(event, self.tell_status)
+                
+            elif status == 'error':
+                # 任务出错
+                error_msg = aria2_status.get('errorMessage', 'Unknown error')
+                print(f"[同步] ❌ 检测到任务 {gid[:8]}... 出错: {error_msg},触发错误事件")
+                event = {
+                    'method': 'aria2.onDownloadError',
+                    'params': [{'gid': gid}]
+                }
+                await self.download_handler.on_download_error(event, self.tell_status)
+                
+            elif status == 'removed':
+                # 任务被移除
+                print(f"[同步] 🗑️ 任务 {gid[:8]}... 已被移除")
+                # 不触发事件,只记录
+                
+        except Exception as e:
+            print(f"[同步] 同步任务 {gid[:8]}... 状态时出错: {e}")
+            import traceback
+            traceback.print_exc()

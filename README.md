@@ -1,20 +1,28 @@
 # MistRelay
 
-基于Telegram机器人的aria2下载控制系统，支持OneDrive自动上传，并集成了文件直链功能
+基于 Telegram 机器人的 aria2 下载控制系统，支持 OneDrive 自动上传，并集成了文件直链功能。
 
-## 一、特点
+## ✨ 功能特点
 
-1. 基于电报机器人控制aria2，可自行设置下载完成后的处理方式
-2. 支持下载完成后通过rclone自动上传到OneDrive
-3. 支持`批量`添加http、磁力、种子下载
-4. 支持自定义目录下载，使用 /path 命令设置
-5. 自己实现`aria2c` `jsonrpc`调用，增加断开重连功能
-6. 命令 /web 获取在线ariaNg web控制地址，方便跳转
-7. 下载实时进度、上传实时进度显示
-8. Docker一键部署，集成aria2和rclone
-9. **新增：集成文件直链功能，可为Telegram文件生成直链**
+### 核心功能
+- **Telegram 控制**: 基于电报机器人控制 aria2，支持任务管理。
+- **自动上传**: 下载完成后通过 rclone 自动上传到 OneDrive。
+- **数据完整性保障**: 
+  - 下载文件大小校验（与 aria2 报告对比）。
+  - OneDrive 上传后远程文件校验（存在性 + 大小 + MD5）。
+  - 校验失败自动重试（最多3次）。
+  - 确保数据安全，防止数据丢失。
+- **文件直链**: 整合 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)，为 Telegram 文件生成可访问的直链。
+- **下载管理**:
+  - 支持 HTTP/HTTPS、磁力链接、种子文件下载。
+  - 支持批量添加任务。
+  - 支持自定义下载目录。
+  - 实时进度显示（Bot 消息 & Web 界面）。
+  - 任务暂停/恢复/删除/自动重连。
+- **Web 管理界面**: 集成 AriaNg 和自定义系统管理页面。
+- **部署友好**: Docker 一键部署，集成 aria2、rclone 和前端。
 
-## 二、如何安装
+## 🚀 快速开始
 
 ### 1. 配置文件设置
 
@@ -25,257 +33,148 @@ git clone https://github.com/Lapis0x0/MistRelay.git
 cd MistRelay
 ```
 
-重命名 `db/config.example.yml` 为 `config.yml` 并设置参数：
+重命名 `db/config.example.yml` 为 `config.yml` 并设置参数（详细配置见文件内注释）：
 
 ```yaml
 API_ID: xxxx                      # Telegram API ID
 API_HASH: xxxxxxxx                # Telegram API Hash
 BOT_TOKEN: xxxx:xxxxxxxxxxxx      # Telegram Bot Token
-ADMIN_ID: 管理员ID                 # 管理员的Telegram ID
-FORWARD_ID: 文件转发目标id          # 可选，文件转发目标ID
-
-# 上传设置
-UP_TELEGRAM: false                # 是否上传到电报
-UP_ONEDRIVE: true                 # 是否启用rclone上传到OneDrive
-
-# rclone配置
-RCLONE_REMOTE: onedrive           # rclone配置的远程名称
-RCLONE_PATH: /Downloads           # OneDrive上的目标路径
-
-# aria2c设置（Docker集成后可使用默认值）
-RPC_SECRET: xxxxxxx               # RPC密钥（建议修改为自定义密钥）
-RPC_URL: localhost:6800/jsonrpc   # 使用Docker部署时必须使用localhost或127.0.0.1
-
-# 代理设置（可选）
-PROXY_IP:                         # 代理IP，不需要则留空
-PROXY_PORT:                       # 代理端口，不需要则留空
-
-# 自动删除本地文件设置
-AUTO_DELETE_AFTER_UPLOAD: true    # 是否在成功上传到OneDrive后自动删除本地文件
+ADMIN_ID: management_id           # 管理员 Telegram ID
+# ... 其他配置 ...
 ```
 
-### 2. 配置rclone
+### 2. 配置 Rclone
 
-由于VPS通常没有图形界面，无法直接完成OneDrive的OAuth认证流程，建议先在本地电脑上配置rclone，然后将配置文件上传到项目：
+由于 VPS 通常没有图形界面，建议在本地配置 rclone 后上传配置文件：
+
+1.  **本地配置**: 在本地电脑运行 `rclone config` 完成 OneDrive 授权。
+2.  **上传配置**: 将本地生成的 `rclone.conf` 复制到项目的 `rclone/` 目录下。
 
 ```bash
-# 在本地电脑上安装rclone（如果尚未安装）
-# Windows: 下载安装包 https://rclone.org/downloads/
-# macOS: brew install rclone
-# Linux: curl https://rclone.org/install.sh | sudo bash
-
-# 在本地电脑上配置rclone（会打开浏览器进行OneDrive授权）
-rclone config
-
-# 配置完成后，在本地找到配置文件
-# Windows: %USERPROFILE%\.config\rclone\rclone.conf
-# macOS/Linux: ~/.config/rclone/rclone.conf
-
-# 在项目目录中创建rclone目录
+# 示例：创建目录并上传
 mkdir -p rclone
-
-# 将本地的配置文件复制到项目的rclone目录
-# 然后将此目录上传到您的VPS
+# 将 rclone.conf 放入此目录
 ```
 
-配置文件包含敏感的访问令牌，请妥善保管，不要分享给他人。
+### 3. Docker 部署 (生产环境)
 
-### 3. 关于aria2c配置
-
-项目已经在Docker中集成了aria2c，您只需要在config.yml中设置：
-
-- `RPC_SECRET`: 这是aria2c的RPC密钥，用于安全访问。建议修改为自定义的强密码。
-- `RPC_URL`: 使用Docker部署时必须使用localhost或127.0.0.1，端口号保持默认值6800即可。
-
-启动容器后，aria2c会自动配置并运行，您不需要单独安装或配置aria2c。
-
-### 4. 关于自动删除本地文件
-
-项目支持在文件成功上传到OneDrive后自动删除本地文件，以节省存储空间：
-
-- `AUTO_DELETE_AFTER_UPLOAD`: 设置为true时，文件成功上传到OneDrive后会自动删除本地文件；设置为false时，保留本地文件。
-
-**注意**：
-- 只有在文件成功上传到OneDrive后才会删除本地文件
-- 如果上传失败或中断，本地文件会保留
-- 对于大文件，系统会等待上传完全成功后才删除本地文件，不用担心上传过程中文件被删除
-
-### 5. 关于OneDrive上传速度优化
-
-项目已经针对OneDrive上传速度进行了优化，使用了以下rclone参数：
-
-- `--transfers 32`: 增加并行传输数量
-- `--checkers 16`: 增加并行检查数量
-- `--onedrive-chunk-size 64M`: 增加OneDrive上传分块大小
-- `--buffer-size 64M`: 增加缓冲区大小
-- `--drive-pacer-min-sleep 10ms`: 减少API请求间隔
-- `--drive-pacer-burst 1000`: 增加爆发限制
-
-这些优化参数可以显著提高上传速度，特别是对于大文件。如果您仍然遇到上传速度慢的问题，可能是由于以下原因：
-
-1. 服务器到OneDrive的网络连接质量
-2. Microsoft对API请求的限制
-3. 服务器CPU或内存资源限制
-
-### 6. 使用Docker部署
-
-安装Docker和Docker Compose：
+MistRelay 使用 Docker Compose 进行一键部署，集成了前后端和所有依赖。
 
 ```bash
-curl -fsSL get.docker.com -o get-docker.sh && sh get-docker.sh && systemctl enable docker && systemctl start docker
-```
-
-**注意**:Docker配置已合并,现在只需要一个容器即可同时运行下载管理、直链功能和Web管理界面。
-
-构建并启动容器：
-
-```bash
+# 构建并启动服务
 docker compose up -d --build
-```
 
-查看日志：
-
-```bash
-docker compose logs -f --tail=4000
+# 查看日志
+docker compose logs -f --tail=100
 ```
 
 **端口说明**:
-- Web服务器默认监听8080端口,提供:
-  - **Web管理界面**: `http://your-server:8080/` (前端已集成到镜像中)
-  - **API接口**: `http://your-server:8080/api/*`
-  - **文件直链**: `http://your-server:8080/[hash][message_id]`
-- 由于使用了`network_mode: host`,端口会自动映射到主机
-- 如果需要修改端口映射,可以在`docker-compose.yml`中取消注释`ports`部分
+- **Web 界面**: `http://your-server:8080` (端口映射可在 `docker-compose.yml` 中修改)
+- **API 接口**: `http://your-server:8080/api/*`
 
-**访问Web界面**:
-- 构建完成后,访问 `http://your-server:8080` 即可使用Web管理界面
-- Web界面提供下载管理、系统配置、日志查看等功能
-- 前端已通过多阶段构建集成到Docker镜像中,无需单独部署
+### 4. 访问服务
 
-### 7.如何更新项目
+启动后，访问 `http://your-server:8080` 即可使用 Web 管理界面。
+- **AriaNg**: 用于管理 Aria2 下载任务。
+- **系统管理**: `http://your-server:8080/system` 用于管理 Docker 容器状态。
 
-当有新版本发布时，您可以按照以下步骤更新项目：
+## 📖 使用指南
 
-1. 备份您的配置文件和rclone配置：
-
-```bash
-# 备份配置文件
-cp db/config.yml db/config.yml.backup
-# 备份rclone配置
-cp rclone/rclone.conf rclone/rclone.conf.backup
-```
-
-2. 拉取最新代码：
-
-```bash
-# 获取最新代码
-git pull
-
-# 如果有冲突，可以先重置本地修改
-# git reset --hard
-# git pull
-```
-
-3. 重新构建并启动容器：
-
-```bash
-# 停止并删除旧容器
-docker compose down
-
-# 重新构建并启动
-docker compose up -d --build
-```
-
-4. 检查日志确认一切正常：
-
-```bash
-docker compose logs -f
-```
-
-如果更新后出现问题，您可以恢复备份的配置文件，然后重新构建容器。
-
-### 8.使用方法
-
-1. 在Telegram中找到您的机器人并发送 `/start` 命令
-2. 使用 `/help` 查看帮助信息
-3. 发送HTTP链接、磁力链接或种子文件开始下载
-4. 使用菜单按钮管理下载任务
-5. 使用 `/path` 命令设置下载目录
-6. 使用 `/web` 命令获取ariaNg在线控制地址
-
-### 9.命令列表
-
+### Telegram Bot 命令
 - `/start` - 开始使用
 - `/help` - 查看帮助
 - `/info` - 查看系统信息
-- `/web` - 获取ariaNg在线地址
+- `/web` - 获取 Web 控制台地址
 - `/path [目录]` - 设置下载目录
 
-### 10.菜单功能
+### 菜单功能
+- **正在下载/等待/已完成**: 查看各状态的任务列表。
+- **暂停/恢复/删除**: 管理选中任务。
 
-- ⬇️正在下载 - 查看正在下载的任务
-- ⌛️ 正在等待 - 查看等待中的任务
-- ✅ 已完成/停止 - 查看已完成或停止的任务
-- ⏸️暂停任务 - 暂停选中的任务
-- ▶️恢复任务 - 恢复选中的任务
-- ❌ 删除任务 - 删除选中的任务
-- ❌ ❌ 清空已完成/停止 - 清空所有已完成或停止的任务
+### 文件直链功能
+默认启用（可配置）。
+1. **使用**: 发送或转发文件给 Bot。
+2. **结果**: Bot 会返回文件的直链地址（支持文档、视频、音频等）。
+3. **自动下载**: 
+   - 若开启 `STREAM_AUTO_DOWNLOAD: true`，管理员发送的文件会自动加入 Aria2 下载队列。
+   - 需配置 `BIN_CHANNEL` 以确保日志存储正常。
 
-### 11.直链功能使用说明（默认启用，作为TG媒体文件前置处理）
+### 快捷提示
+- **OneDrive 上传优化**: 项目默认配置了优化参数（如 `--transfers 32`, `--chunk-size 64M` 等）以提升速度。
+- **自动删除**: 配置 `AUTO_DELETE_AFTER_UPLOAD: true` 可在上传成功后自动清理本地文件。
 
-**直链功能默认启用**，作为Telegram媒体文件下载的前置功能。当用户发送文件给机器人时，会先通过直链功能处理。
+## 🛠 系统管理模块
 
-1. **配置要求**：
-   - **必须配置** `BIN_CHANNEL`（日志频道ID）
-   - 确保机器人已添加到该频道并具有管理员权限
-   - 如果未配置 `BIN_CHANNEL`，直链功能将无法正常工作
+系统管理模块 (`/system`) 提供 Docker 容器的实时监控与控制。
 
-2. **工作流程**：
-   - 用户发送或转发文件给机器人
-   - **第一步**：机器人自动生成直链并返回给用户（前置处理）
-   - **第二步**：如果启用了自动下载（`STREAM_AUTO_DOWNLOAD: true`）且是管理员，机器人会自动将直链添加到aria2下载队列
-   - **第三步**：用户可以使用直链进行下载或分享
-   - 支持的文件类型：文档、视频、音频、图片、动画、语音、视频笔记、贴纸
+### 功能
+- **状态查看**: 实时查看容器运行状态、镜像信息。
+- **热重载**: 支持通过 Web 界面一键重启容器 (Restart Container)。
+- **日志查看**: 实时获取容器运行日志 (支持筛选行数)。
 
-3. **直链格式**：
-   - 完整链接：`http://your-domain:port/message_id/filename?hash=xxx`
-   - 短链接：`http://your-domain:port/hashmessage_id`
+### 配置要求
+系统管理模块依赖于 Docker Socket 挂载 (已在 `docker-compose.yml` 默认配置):
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
 
-4. **权限控制**：
-   - 如果设置了 `STREAM_ALLOWED_USERS`，只有列表中的用户可以使用直链功能
-   - 留空则允许所有人使用
+## 💻 开发者指南
 
-5. **自动下载功能**：
-   - 默认启用（`STREAM_AUTO_DOWNLOAD: true`）
-   - 仅对管理员发送的文件自动添加到aria2下载队列
-   - 如果不需要自动下载，可以设置 `STREAM_AUTO_DOWNLOAD: false`
-   - 非管理员用户发送的文件只会生成直链，不会自动下载
+如果您想参与开发或进行二次开发，请参考以下信息。
 
-6. **禁用直链功能**：
-   - 如果不需要直链功能，可以在 `config.yml` 中设置 `ENABLE_STREAM: false`
-   - 但建议保持启用，因为它提供了便捷的文件访问方式
+### 架构概述
+- **后端**: Python + aiohttp (Port 8080)
+- **前端**: Vue3 + Vite + Element Plus (Dev Port 5173)
 
-## 三、应用截图
+### 开发模式启动
+使用 `start-dev.sh` 脚本可一键启动前后端分离的开发环境：
 
-使用 `/help` 命令查看帮助信息和功能列表。
+```bash
+./start-dev.sh
+```
 
-## 四、致谢
+此模式下：
+- 前端支持 HMR (热重载)。
+- API 请求会自动代理到后端容器。
+- 访问 `http://localhost:5173` 进行开发。
 
-https://github.com/HouCoder/tele-aria2
+### 生产构建原理
+Dockerfile 使用多阶段构建：
+1. `node` 阶段构建前端静态资源 (`dist` 目录)。
+2. `python` 阶段通过 aiohttp 提供 API 服务，并将 `/` 路由指向前端 `index.html`。
 
-https://github.com/jw-star/aria2bot
+## 📝 更新日志
 
-## 五、合并说明
+### [1.1.0] - 2026-01-26 (数据完整性增强)
+- **🔒 数据安全**:
+  - 新增下载文件大小校验（与 aria2 totalLength 对比）。
+  - 新增 OneDrive 上传后远程文件校验（存在性 + 大小）。
+  - 新增 MD5 哈希校验（可选，提供字节级完整性保证）。
+  - 新增自动重试机制（校验失败时自动重试最多3次）。
+- **🛡️ 防护机制**:
+  - 校验失败时保留本地文件，防止数据丢失。
+  - 智能降级策略（MD5 不可用时降级为大小校验）。
+  - 详细的错误日志和用户通知。
 
-本项目已合并了TG-FileStreamBot的文件直链功能，现在同时支持：
-- aria2下载管理（原有功能）
-- OneDrive自动上传（原有功能）
-- **Telegram文件直链生成（默认启用，作为TG媒体文件前置处理）**
+### [1.0.0] - 2026-01-22 (首个发行版)
+- **🎉 发布**: 整合了 [MistRelay](https://github.com/Lapis0x0/MistRelay) 和 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)。
+- **✨ 新增**:
+  - 完整的 Aria2 + Rclone 自动化流程。
+  - 统一的 Web UI。
+  - Docker 容器集成与系统管理功能。
+  - 消息美化与实时进度展示。
 
-**重要**：直链功能默认启用，作为Telegram媒体文件的前置处理。当用户发送文件给机器人时，会先自动生成直链，然后再进行其他处理（如下载等）。这提供了更便捷的文件访问和分享方式。
+## 🗓 未来计划
+- [ ] 支持文件重命名
+- [ ] 优化菜单交互 (更清晰的键盘布局)
+- [ ] 引入大模型 (LLM) 自动整理文件列表
+- [ ] 更多云存储服务支持
+- [ ] 文件预览与搜索功能
 
-## 六、未来计划
-- [ ] 支持重命名文件
-- [ ] 更清晰、强大的菜单键
-- [ ] 支持通过大模型来自动管理文件列表
-- [ ] 优化直链功能的性能
+## 🙏 致谢
+本项目整合了以下优秀的开源项目：
+- [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot) - 文件直链生成
+- [MistRelay](https://github.com/Lapis0x0/MistRelay) - Aria2 下载控制
+- [HouCoder/tele-aria2](https://github.com/HouCoder/tele-aria2)
+- [jw-star/aria2bot](https://github.com/jw-star/aria2bot)

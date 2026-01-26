@@ -107,9 +107,10 @@
           <div class="flex gap-2">
             <el-select 
               v-model="logLines" 
-              @change="fetchLogs"
+              @change="handleLogLinesChange"
               style="width: 120px"
               size="small"
+              :disabled="wsConnected"
             >
               <el-option label="50 行" :value="50" />
               <el-option label="100 行" :value="100" />
@@ -117,31 +118,57 @@
               <el-option label="500 行" :value="500" />
             </el-select>
             <el-button 
+              v-if="!wsConnected"
+              :icon="VideoPlay"
+              circle 
+              size="small" 
+              @click="startLogStream"
+              :loading="connecting"
+              title="开始实时日志"
+            />
+            <el-button 
+              v-else
+              :icon="VideoPause"
+              circle 
+              size="small" 
+              @click="stopLogStream"
+              title="停止实时日志"
+            />
+            <el-button 
               :icon="Refresh" 
               circle 
               size="small" 
               @click="fetchLogs"
               :loading="loadingLogs"
+              :disabled="wsConnected"
+              title="刷新日志"
+            />
+            <el-button 
+              :icon="Delete"
+              circle 
+              size="small" 
+              @click="clearLogs"
+              title="清空日志"
             />
           </div>
         </div>
       </template>
       
-      <el-skeleton v-if="loadingLogs" :rows="10" animated />
+      <el-skeleton v-if="loadingLogs && !wsConnected" :rows="10" animated />
       
-      <div v-else-if="dockerLogs" class="logs-container">
-        <pre class="logs-content">{{ dockerLogs }}</pre>
+      <div v-else class="logs-container" ref="logsContainerRef">
+        <pre class="logs-content" ref="logsContentRef">{{ dockerLogs }}</pre>
       </div>
       
-      <el-empty v-else description="无法获取容器日志" />
+      <el-empty v-if="!dockerLogs && !wsConnected" description="无法获取容器日志" />
     </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, RefreshRight } from '@element-plus/icons-vue'
+import { Refresh, RefreshRight, VideoPlay, VideoPause, Delete } from '@element-plus/icons-vue'
 import { getDockerStatus, restartDocker, getDockerLogs } from '@/api'
 import type { DockerStatus } from '@/types/api'
 import { formatDate } from '@/utils/formatters'
@@ -154,6 +181,11 @@ const restarting = ref(false)
 const restartMessage = ref('')
 const restartSuccess = ref(false)
 const logLines = ref(100)
+const wsConnected = ref(false)
+const connecting = ref(false)
+const ws = ref<WebSocket | null>(null)
+const logsContainerRef = ref<HTMLElement | null>(null)
+const logsContentRef = ref<HTMLElement | null>(null)
 
 function fetchDockerStatus() {
   loadingStatus.value = true
@@ -260,6 +292,11 @@ onMounted(() => {
   fetchDockerStatus()
   fetchLogs()
 })
+
+onUnmounted(() => {
+  // 组件卸载时关闭WebSocket连接
+  stopLogStream()
+})
 </script>
 
 <style scoped>
@@ -287,12 +324,30 @@ onMounted(() => {
   @apply bg-gray-900 rounded-lg p-4 overflow-auto;
   max-height: 600px;
   font-family: 'Courier New', monospace;
+  position: relative;
 }
 
 .logs-content {
   @apply text-gray-100 text-sm whitespace-pre-wrap;
   margin: 0;
   line-height: 1.5;
+  word-break: break-all;
+}
+
+.logs-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.logs-container::-webkit-scrollbar-track {
+  @apply bg-gray-800 rounded;
+}
+
+.logs-container::-webkit-scrollbar-thumb {
+  @apply bg-gray-600 rounded;
+}
+
+.logs-container::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-500;
 }
 
 :deep(.el-descriptions__label) {

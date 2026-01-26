@@ -118,6 +118,10 @@ STREAM_ALLOWED_USERS = result.get('STREAM_ALLOWED_USERS', '')
 STREAM_AUTO_DOWNLOAD = result.get('STREAM_AUTO_DOWNLOAD', True)
 # 是否发送直链信息给用户（默认不启用，设置为 True 后才会发送直链信息给用户，关闭后仍会生成直链并添加到下载队列）
 SEND_STREAM_LINK = result.get('SEND_STREAM_LINK', False)
+# 是否跳过小于指定大小的媒体文件（默认False）
+SKIP_SMALL_FILES = result.get('SKIP_SMALL_FILES', False)
+# 最小文件大小（MB），小于此大小的文件将被跳过（默认100MB）
+MIN_FILE_SIZE_MB = result.get('MIN_FILE_SIZE_MB', 100)
 # 多机器人负载配置
 # 如果配置了额外的BOT_TOKEN，将启用多机器人负载均衡
 # MULTI_BOT_TOKENS 可以是字符串（逗号分隔）或列表

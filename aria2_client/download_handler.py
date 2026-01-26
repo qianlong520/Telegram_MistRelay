@@ -22,7 +22,7 @@ from .constants import (
 class DownloadHandler:
     """处理Aria2下载事件"""
     
-    def __init__(self, bot, download_messages, completed_gids, upload_handler):
+    def __init__(self, bot, download_messages, completed_gids, upload_handler, client=None):
         """
         初始化下载处理器
         
@@ -31,11 +31,13 @@ class DownloadHandler:
             download_messages: 下载消息字典 {gid: message}
             completed_gids: 已完成的GID集合
             upload_handler: 上传处理器实例
+            client: Aria2客户端实例（用于移除任务）
         """
         self.bot = bot
         self.download_messages = download_messages
         self.completed_gids = completed_gids
         self.upload_handler = upload_handler
+        self.client = client
     
     async def on_download_start(self, result, tell_status_func):
         """
@@ -84,6 +86,59 @@ class DownloadHandler:
                     else:
                         await asyncio.sleep(3)
                     continue
+                
+                # 检查是否需要跳过小文件
+                # 动态获取配置值（支持热重载）
+                from configer import get_config_value
+                skip_small_files = get_config_value('SKIP_SMALL_FILES', False)
+                min_file_size_mb = get_config_value('MIN_FILE_SIZE_MB', 100)
+                
+                # 调试信息：仅在第一次运行时打印配置
+                if first_run:
+                    print(f"[跳过小文件] 配置检查: SKIP_SMALL_FILES={skip_small_files}, MIN_FILE_SIZE_MB={min_file_size_mb}MB, totalLength={totalLength}")
+                
+                # 如果文件大小还未获取到（totalLength为0或None），等待一下再检查
+                if skip_small_files and (not totalLength or int(totalLength) == 0):
+                    if first_run:
+                        # 第一次运行时，如果文件大小为0，等待一下再重试
+                        await asyncio.sleep(0.5)
+                        continue
+                
+                if skip_small_files and totalLength and int(totalLength) > 0:
+                    min_size_bytes = min_file_size_mb * 1024 * 1024  # 转换为字节
+                    file_size_bytes = int(totalLength)
+                    if file_size_bytes < min_size_bytes:
+                        # 文件小于最小大小，移除任务
+                        print(f"[跳过小文件] ✅ 任务 {gid} 文件大小 {byte2_readable(file_size_bytes)} ({file_size_bytes} 字节) 小于 {min_file_size_mb}MB ({min_size_bytes} 字节)，移除任务")
+                        print(f"[跳过小文件] 配置: SKIP_SMALL_FILES={skip_small_files}, MIN_FILE_SIZE_MB={min_file_size_mb}")
+                        
+                        # 移除任务
+                        if self.client:
+                            try:
+                                await self.client.remove(gid)
+                                print(f"[跳过小文件] 已移除任务 {gid}")
+                            except Exception as e:
+                                print(f"[跳过小文件] 移除任务失败: {e}")
+                        
+                        # 静默处理，不发送通知消息
+                        
+                        # 记录到数据库：标记为失败状态，并在错误信息中记录跳过原因
+                        try:
+                            from db import mark_download_failed
+                            error_msg = f"文件大小 {byte2_readable(int(totalLength))} 小于最小限制 {min_file_size_mb}MB，已跳过下载"
+                            mark_download_failed(gid, error_msg)
+                            print(f"[跳过小文件] 已记录到数据库: {gid}")
+                        except Exception as e:
+                            print(f"[跳过小文件] 记录到数据库失败: {e}")
+                        
+                        # 从消息字典中移除
+                        if gid in self.download_messages:
+                            del self.download_messages[gid]
+                        
+                        # 标记为已完成（避免重复处理）
+                        self.completed_gids.add(gid)
+                        
+                        return  # 退出进度检查循环
                 
                 dir_path = task.get("dir", "")
                 size = byte2_readable(int(totalLength))
@@ -221,6 +276,9 @@ class DownloadHandler:
                     # 检查目录中是否有相似的文件名
                     if os.path.exists(dir_path):
                         try:
+                            # 获取期望的文件大小
+                            expected_size = int(tellStatus.get('totalLength', 0))
+                            
                             for file_name in os.listdir(dir_path):
                                 # 检查是否是同一个文件（可能是 aria2 重命名的版本）
                                 if file_name.startswith(name_without_ext) and file_name.endswith(ext):
@@ -230,11 +288,19 @@ class DownloadHandler:
                                         # 检查是否是最近修改的（5分钟内）
                                         file_mtime = os.path.getmtime(potential_path)
                                         if time.time() - file_mtime < FILE_MODIFIED_TIME_WINDOW:  # 文件修改时间窗口内
+                                            # 校验文件大小
+                                            if expected_size > 0:
+                                                from .utils import verify_file_size
+                                                if not verify_file_size(potential_path, expected_size, tolerance=1024):
+                                                    print(f"[下载] 文件大小不匹配,跳过: {potential_path}")
+                                                    continue  # 继续查找其他文件
+                                            
                                             actual_path = potential_path
                                             print(f"找到实际文件路径: {actual_path} (原始路径: {path})")
                                             break
                         except Exception as e:
                             print(f"查找文件时出错: {e}")
+
                 
                 # 再次检查文件是否存在
                 if not os.path.exists(actual_path):
@@ -367,8 +433,11 @@ class DownloadHandler:
                     except Exception as e:
                         print(f"创建上传记录失败: {e}")
 
-                    # 使用rclone上传到OneDrive，传递消息对象、实际路径和GID
-                    await self.upload_handler.upload_to_onedrive(actual_path, msg, gid, upload_id=upload_id)
+                    # 使用rclone上传到OneDrive，异步非阻塞执行
+                    asyncio.create_task(
+                        self.upload_handler.upload_to_onedrive(actual_path, msg, gid, upload_id=upload_id)
+                    )
+                    print(f"[上传] 已启动OneDrive上传任务(异步): {os.path.basename(actual_path)}")
                 elif UP_TELEGRAM:
                     # 创建上传记录
                     upload_id = None
@@ -380,8 +449,11 @@ class DownloadHandler:
                     except Exception as e:
                         print(f"创建上传记录失败: {e}")
                         
-                    # 上传到Telegram，使用多客户端负载均衡（如果启用）
-                    await self.upload_handler.upload_to_telegram_with_load_balance(actual_path, gid, upload_id=upload_id)
+                    # 上传到Telegram，异步非阻塞执行
+                    asyncio.create_task(
+                        self.upload_handler.upload_to_telegram_with_load_balance(actual_path, gid, upload_id=upload_id)
+                    )
+                    print(f"[上传] 已启动Telegram上传任务(异步): {os.path.basename(actual_path)}")
     
     async def on_download_pause(self, result, tell_status_func):
         """

@@ -46,7 +46,8 @@ export function getStatusText(status?: string): string {
     completed: '已完成',
     downloading: '下载中',
     failed: '失败',
-    pending: '等待中'
+    pending: '等待中',
+    skipped: '已跳过'
   }
   return statusMap[status || ''] || status || '未知'
 }
@@ -56,7 +57,8 @@ export function getStatusTagType(status?: string): 'success' | 'warning' | 'dang
     completed: 'success',
     downloading: 'warning',
     failed: 'danger',
-    pending: 'info'
+    pending: 'info',
+    skipped: 'info'
   }
   return typeMap[status || ''] || 'info'
 }

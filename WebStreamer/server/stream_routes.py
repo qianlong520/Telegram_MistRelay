@@ -439,6 +439,217 @@ async def docker_logs_handler(request: web.Request):
         })
 
 
+@routes.get("/api/system/docker/logs/ws")
+async def docker_logs_ws_handler(request: web.Request):
+    """WebSocket实时推送Docker容器日志"""
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    
+    try:
+        # 检查是否在Docker容器内
+        if not os.path.exists("/.dockerenv"):
+            await ws.send_json({
+                "type": "error",
+                "message": "不在Docker容器内运行"
+            })
+            await ws.close()
+            return ws
+        
+        # 检查Docker SDK是否可用
+        if not DOCKER_AVAILABLE:
+            await ws.send_json({
+                "type": "error",
+                "message": "Docker Python SDK不可用，请安装docker包"
+            })
+            await ws.close()
+            return ws
+        
+        # 获取初始日志行数（从查询参数）
+        tail_lines = int(request.query.get("tail", "100"))
+        tail_lines = max(1, min(tail_lines, 1000))  # 限制在1-1000行
+        
+        # 查找容器
+        container = None
+        try:
+            client = docker.from_env()
+            container_id = None
+            
+            # 方法1: 尝试通过容器ID查找（从cgroup获取）
+            try:
+                with open("/proc/self/cgroup", "r") as f:
+                    for line in f:
+                        if "docker" in line:
+                            container_id = line.split("/")[-1].strip()
+                            break
+            except:
+                pass
+            
+            # 方法2: 尝试通过容器名称查找
+            container_names = ["mistrelay"]
+            hostname = os.environ.get("HOSTNAME", "")
+            if hostname and hostname not in container_names:
+                container_names.append(hostname)
+            
+            # 如果从cgroup获取到ID，优先使用ID查找
+            if container_id:
+                try:
+                    container = client.containers.get(container_id)
+                except docker.errors.NotFound:
+                    pass
+            
+            # 如果ID查找失败，尝试通过名称查找
+            if not container:
+                for name in container_names:
+                    try:
+                        containers = client.containers.list(filters={"name": name})
+                        if containers:
+                            container = containers[0]
+                            break
+                    except:
+                        continue
+            
+            # 如果还是找不到，尝试获取所有容器并匹配
+            if not container:
+                all_containers = client.containers.list(all=True)
+                if container_id:
+                    for c in all_containers:
+                        if container_id in c.id or container_id in c.name:
+                            container = c
+                            break
+                if not container and all_containers:
+                    container = all_containers[0]
+            
+            if not container:
+                await ws.send_json({
+                    "type": "error",
+                    "message": "无法找到容器"
+                })
+                await ws.close()
+                return ws
+            
+            # 先发送历史日志
+            try:
+                logs = container.logs(tail=tail_lines, timestamps=False).decode('utf-8', errors='replace')
+                await ws.send_json({
+                    "type": "history",
+                    "logs": logs
+                })
+            except Exception as e:
+                logger.error(f"获取历史日志失败: {e}")
+                await ws.send_json({
+                    "type": "error",
+                    "message": f"获取历史日志失败: {str(e)}"
+                })
+            
+            # 开始实时流式推送日志
+            await ws.send_json({
+                "type": "stream_start",
+                "message": "开始实时日志流"
+            })
+            
+            # 使用Docker的logs API的stream模式（异步处理）
+            try:
+                import asyncio
+                import threading
+                
+                # 创建事件来控制日志流
+                stop_event = threading.Event()
+                log_queue = asyncio.Queue()
+                
+                def read_logs_thread():
+                    """在后台线程中读取Docker日志流"""
+                    try:
+                        log_stream = container.logs(stream=True, follow=True, timestamps=False, tail=0)
+                        
+                        for log_chunk in log_stream:
+                            if stop_event.is_set() or ws.closed:
+                                break
+                            
+                            try:
+                                log_line = log_chunk.decode('utf-8', errors='replace').rstrip('\n\r')
+                                if log_line:
+                                    # 将日志行放入队列
+                                    asyncio.run_coroutine_threadsafe(
+                                        log_queue.put(log_line),
+                                        asyncio.get_event_loop()
+                                    )
+                            except Exception as e:
+                                logger.error(f"处理日志行失败: {e}")
+                                continue
+                                
+                    except Exception as e:
+                        logger.error(f"日志流线程错误: {e}")
+                        if not ws.closed:
+                            asyncio.run_coroutine_threadsafe(
+                                ws.send_json({
+                                    "type": "error",
+                                    "message": f"日志流错误: {str(e)}"
+                                }),
+                                asyncio.get_event_loop()
+                            )
+                
+                # 启动后台线程读取日志
+                log_thread = threading.Thread(target=read_logs_thread, daemon=True)
+                log_thread.start()
+                
+                # 从队列中读取日志并发送
+                try:
+                    while not ws.closed and not stop_event.is_set():
+                        try:
+                            # 等待日志行，设置超时以便定期检查连接状态
+                            log_line = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                            await ws.send_json({
+                                "type": "log",
+                                "line": log_line
+                            })
+                        except asyncio.TimeoutError:
+                            # 超时是正常的，继续循环检查连接状态
+                            continue
+                        except Exception as e:
+                            logger.error(f"发送日志行失败: {e}")
+                            break
+                finally:
+                    # 停止日志流线程
+                    stop_event.set()
+                    log_thread.join(timeout=2)
+                    
+                        
+            except Exception as e:
+                logger.error(f"日志流错误: {e}")
+                await ws.send_json({
+                    "type": "error",
+                    "message": f"日志流错误: {str(e)}"
+                })
+                
+        except docker.errors.APIError as e:
+            logger.error(f"Docker API错误: {e}")
+            await ws.send_json({
+                "type": "error",
+                "message": f"Docker API错误: {str(e)}"
+            })
+        except Exception as e:
+            logger.error(f"WebSocket日志流错误: {e}", exc_info=True)
+            await ws.send_json({
+                "type": "error",
+                "message": f"错误: {str(e)}"
+            })
+            
+    except Exception as e:
+        logger.error(f"WebSocket连接错误: {e}", exc_info=True)
+        try:
+            await ws.send_json({
+                "type": "error",
+                "message": f"连接错误: {str(e)}"
+            })
+        except:
+            pass
+    
+    finally:
+        await ws.close()
+    
+    return ws
+
+
 @routes.get("/api/config", allow_head=True)
 async def get_config_handler(request: web.Request):
     """获取系统配置"""
@@ -485,6 +696,8 @@ async def update_config_handler(request: web.Request):
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
             'PROXY_IP': ('string', 'download', '代理IP'),
             'PROXY_PORT': ('string', 'download', '代理端口'),
+            'SKIP_SMALL_FILES': ('bool', 'download', '是否跳过小于指定大小的媒体文件'),
+            'MIN_FILE_SIZE_MB': ('int', 'download', '最小文件大小（MB），小于此大小的文件将被跳过'),
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
             'RPC_URL': ('string', 'aria2', 'Aria2 RPC URL'),
             'ENABLE_STREAM': ('bool', 'stream', '是否启用直链功能'),

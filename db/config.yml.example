@@ -57,6 +57,10 @@ STREAM_ALLOWED_USERS:
 STREAM_AUTO_DOWNLOAD: true
 # 是否发送直链信息给用户(默认不启用,设置为 true 后才会发送直链信息给用户,关闭后仍会生成直链并添加到下载队列)
 SEND_STREAM_LINK: false 
+# 是否跳过小于指定大小的媒体文件(默认false)
+SKIP_SMALL_FILES: false
+# 最小文件大小(MB),小于此大小的文件将被跳过(默认100MB)
+MIN_FILE_SIZE_MB: 100
 # 多机器人负载均衡配置(可选)
 # 配置额外的BOT_TOKEN以实现负载均衡,提高并发处理能力
 # 注意:这些是额外的token,默认的BOT_TOKEN(上面的BOT_TOKEN)会作为第一个客户端(索引0)

@@ -16,6 +16,10 @@ RCLONE_RETRY_BASE_DELAY = 10  # rclone重试基础延迟(秒)
 RCLONE_RETRY_EXTRA_DELAY = 5  # rclone重试额外延迟(秒)
 PROCESS_TERMINATE_TIMEOUT = 5  # 进程终止超时时间(秒)
 
+# 轮询配置
+POLL_INTERVAL = 30  # 活动任务轮询间隔(秒)
+IDLE_CHECK_INTERVAL = 60  # 空闲时检查间隔(秒)
+
 # 导入多客户端负载均衡（如果启用直链功能）
 upload_work_loads = {}  # 上传任务的负载跟踪
 pyrogram_clients = {}
