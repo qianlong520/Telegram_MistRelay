@@ -8,6 +8,7 @@ db/downloads.db-shm
 db/downloads.db-wal
 db/bot.session
 db/bot.session-journal
+db/config.yml
 *.db
 *.db-shm
 *.db-wal
