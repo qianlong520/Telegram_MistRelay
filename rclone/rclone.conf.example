@@ -1,0 +1,15 @@
+# rclone配置示例文件
+# 请根据您使用的云存储服务进行配置
+# 配置完成后,将此文件重命名为 rclone.conf
+
+# OneDrive配置示例
+[onedrive]
+type = onedrive
+# token会在首次运行rclone config时自动生成
+# 请勿手动填写,使用 rclone config 命令进行配置
+token = {"access_token":"your_access_token","token_type":"Bearer","refresh_token":"your_refresh_token","expiry":"2026-01-01T00:00:00Z"}
+drive_id = your_drive_id
+drive_type = personal
+
+# 其他云存储配置示例(Google Drive, Dropbox等)
+# 请参考 rclone 官方文档: https://rclone.org/docs/

@@ -4,10 +4,33 @@ rclone.conf
 
 # 忽略数据库文件
 db/downloads.db
+db/downloads.db-shm
+db/downloads.db-wal
+db/bot.session
+db/bot.session-journal
 *.db
+*.db-shm
+*.db-wal
 
 # 忽略前端构建产物
 web/dist/
 web/node_modules/
 web/.vite/
 web/*.log
+
+# 忽略Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略IDE配置
+.cursor/
+.vscode/
+.idea/
+
+# 忽略临时文件
+*.log
+*.tmp
+downloads/*
+!downloads/.gitkeep
