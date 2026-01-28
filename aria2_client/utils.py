@@ -65,6 +65,88 @@ def format_upload_message(file_path, parsed_progress):
     return ''.join(message_parts)
 
 
+def parse_size_to_bytes(size_str):
+    """
+    将大小字符串（如 "1.234 GiB"）转换为字节
+    
+    Args:
+        size_str: 大小字符串，如 "1.234 GiB", "500 MB" 等
+    
+    Returns:
+        int: 字节数，如果解析失败返回 0
+    """
+    if not size_str:
+        return 0
+    
+    try:
+        # 匹配格式: 数字 单位
+        match = re.match(r'([\d.]+)\s*([KMGT]?i?B)', size_str.strip(), re.IGNORECASE)
+        if not match:
+            return 0
+        
+        value = float(match.group(1))
+        unit = match.group(2).upper()
+        
+        # 转换为字节
+        multipliers = {
+            'B': 1,
+            'KB': 1024,
+            'MB': 1024 ** 2,
+            'GB': 1024 ** 3,
+            'TB': 1024 ** 4,
+            'KIB': 1024,
+            'MIB': 1024 ** 2,
+            'GIB': 1024 ** 3,
+            'TIB': 1024 ** 4,
+        }
+        
+        multiplier = multipliers.get(unit, 1)
+        return int(value * multiplier)
+    except Exception:
+        return 0
+
+
+def parse_speed_to_bytes(speed_str):
+    """
+    将速度字符串（如 "12.34 MiB/s"）转换为字节/秒
+    
+    Args:
+        speed_str: 速度字符串，如 "12.34 MiB/s", "1.5 GB/s" 等
+    
+    Returns:
+        int: 字节/秒，如果解析失败返回 0
+    """
+    if not speed_str:
+        return 0
+    
+    try:
+        # 匹配格式: 数字 单位/s
+        match = re.match(r'([\d.]+)\s*([KMGT]?i?B)/s', speed_str.strip(), re.IGNORECASE)
+        if not match:
+            return 0
+        
+        value = float(match.group(1))
+        unit = match.group(2).upper()
+        
+        # 转换为字节
+        multipliers = {
+            'B': 1,
+            'KB': 1024,
+            'MB': 1024 ** 2,
+            'GB': 1024 ** 3,
+            'TB': 1024 ** 4,
+            'KIB': 1024,
+            'MIB': 1024 ** 2,
+            'GIB': 1024 ** 3,
+            'TIB': 1024 ** 4,
+        }
+        
+        multiplier = multipliers.get(unit, 1)
+        return int(value * multiplier)
+    except Exception:
+        return 0
+
+
 def parse_rclone_progress(line):
     """
     解析 rclone 进度输出行
@@ -72,14 +154,15 @@ def parse_rclone_progress(line):
     或者: "Transferred:   1.234 GiB / 2.345 GiB, 53%, 12.34 MiB/s, ETA -"
     或者: "Transferred:   1.234 GiB / 2.345 GiB, 53%, 12.34 MiB/s, ETA 1h11m47s"
     或者: "Speed: 12.34 MiB/s" (单独一行)
-    返回: dict 包含 transferred, total, percentage, speed, eta
+    返回: dict 包含 transferred, total, percentage, speed, eta, speed_bytes
     """
     result = {
         'transferred': '',
         'total': '',
         'percentage': '',
         'speed': '',
-        'eta': ''
+        'eta': '',
+        'speed_bytes': 0  # 速度（字节/秒）
     }
     
     try:
@@ -91,7 +174,9 @@ def parse_rclone_progress(line):
         for pattern in speed_patterns:
             speed_match = re.search(pattern, line, re.IGNORECASE)
             if speed_match:
-                result['speed'] = f"{speed_match.group(1)} {speed_match.group(2)}"
+                speed_str = f"{speed_match.group(1)} {speed_match.group(2)}"
+                result['speed'] = speed_str
+                result['speed_bytes'] = parse_speed_to_bytes(speed_str)
                 break
         
         # 提取 "Transferred:" 后面的内容
@@ -120,7 +205,9 @@ def parse_rclone_progress(line):
             if match.group(6) and match.group(7):
                 speed_value = match.group(6)
                 speed_unit = match.group(7)
-                result['speed'] = f"{speed_value} {speed_unit}"
+                speed_str = f"{speed_value} {speed_unit}"
+                result['speed'] = speed_str
+                result['speed_bytes'] = parse_speed_to_bytes(speed_str)
             
             # 提取 ETA 信息（group 8）
             if match.group(8):
@@ -159,7 +246,9 @@ def parse_rclone_progress(line):
                     match_pos = speed_match.start()
                     eta_pos = line.find('ETA', match_pos)
                     if eta_pos == -1 or match_pos < eta_pos:
-                        result['speed'] = f"{speed_match.group(1)} {speed_match.group(2)}"
+                        speed_str = f"{speed_match.group(1)} {speed_match.group(2)}"
+                        result['speed'] = speed_str
+                        result['speed_bytes'] = parse_speed_to_bytes(speed_str)
                         break
         
         # 如果还没有提取到 ETA，尝试从整行中提取（作为后备方案）

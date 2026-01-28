@@ -13,7 +13,9 @@ from .utils import (
     aria2_client,
     set_aria2_client,
     should_download_file,
-    send_queue_notification
+    send_queue_notification,
+    register_gid_queue_msg,
+    update_queue_msg_on_cleanup
 )
 
 # 限流控制模块
@@ -64,6 +66,8 @@ __all__ = [
     'set_aria2_client',
     'should_download_file',
     'send_queue_notification',
+    'register_gid_queue_msg',
+    'update_queue_msg_on_cleanup',
     
     # flood_control
     'flood_wait_status',

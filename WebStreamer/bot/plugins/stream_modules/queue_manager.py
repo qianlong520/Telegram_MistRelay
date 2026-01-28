@@ -3,7 +3,8 @@
 
 """
 队列管理模块
-管理消息处理队列，实现严格串行执行
+管理消息处理队列，支持并发处理但限制同时处理的消息数量
+通过 MAX_CONCURRENT_MESSAGES 配置项控制最大并发消息数（默认5）
 """
 
 import logging
@@ -14,9 +15,9 @@ from WebStreamer.utils import get_name
 
 logger = logging.getLogger(__name__)
 
-# 消息处理队列（严格串行执行）
+# 消息处理队列（支持并发处理，但限制同时处理的消息数量）
 # 每条转发给bot的信息都当成一条队列数据
-# 如果当前队列没有执行完，等待队列就不进入（严格按顺序执行，一个完成后再执行下一个）
+# 通过信号量控制并发数，最多同时处理 MAX_CONCURRENT_MESSAGES 条消息（默认5）
 message_processing_queue = None
 queue_processor_task = None
 queue_processing_lock = None  # 用于确保队列处理器只有一个实例在运行
@@ -30,12 +31,15 @@ current_processing_queue_id = None  # 当前正在处理的队列ID
 queue_tracker_lock = asyncio.Lock() if asyncio else None
 queue_id_counter = 0  # 队列ID计数器
 
+# 消息并发控制信号量（用于限制同时处理的消息数量）
+message_concurrent_semaphore = None
+
 
 def _ensure_queue_initialized():
     """
     确保队列已初始化（延迟初始化，在事件循环中创建）
     """
-    global message_processing_queue, queue_processing_lock, queue_tracker_lock
+    global message_processing_queue, queue_processing_lock, queue_tracker_lock, message_concurrent_semaphore
     
     if message_processing_queue is None:
         message_processing_queue = asyncio.Queue()
@@ -49,6 +53,23 @@ def _ensure_queue_initialized():
         except RuntimeError:
             # 如果没有事件循环，稍后初始化
             pass
+    
+    # 初始化消息并发控制信号量（延迟到事件循环中）
+    if message_concurrent_semaphore is None:
+        try:
+            # 获取配置的最大并发消息数（默认5）
+            from configer import get_config_value
+            max_concurrent_messages = get_config_value('MAX_CONCURRENT_MESSAGES', 5)
+            message_concurrent_semaphore = asyncio.Semaphore(max_concurrent_messages)
+            logger.info(f"消息并发控制已初始化，最大并发消息数: {max_concurrent_messages}")
+        except Exception as e:
+            # 如果无法获取配置，使用默认值5
+            try:
+                message_concurrent_semaphore = asyncio.Semaphore(5)
+                logger.info(f"消息并发控制已初始化（使用默认值5）: {e}")
+            except RuntimeError:
+                # 如果没有事件循环，稍后初始化
+                pass
 
 
 def is_flood_wait_error(e: Exception) -> bool:
@@ -60,8 +81,8 @@ def is_flood_wait_error(e: Exception) -> bool:
 
 async def message_queue_processor():
     """
-    消息队列处理器：严格串行执行，一个任务完成后再执行下一个
-    每条转发给bot的信息都当成一条队列数据，如果当前队列没有执行完，等待队列就不进入
+    消息队列处理器：支持并发处理，但限制同时处理的消息数量
+    每条转发给bot的信息都当成一条队列数据，通过信号量控制并发数
     """
     # 延迟导入避免循环依赖
     from .flood_control import flood_wait_status, handle_flood_wait_start, handle_flood_wait_end
@@ -71,7 +92,20 @@ async def message_queue_processor():
     # 确保队列已初始化
     _ensure_queue_initialized()
     
-    logger.info("消息队列处理器已启动(严格串行模式:一个任务完成后再执行下一个)")
+    # 获取配置的最大并发消息数
+    try:
+        from configer import get_config_value
+        max_concurrent_messages = get_config_value('MAX_CONCURRENT_MESSAGES', 5)
+    except Exception:
+        max_concurrent_messages = 5
+    
+    # 初始化信号量（如果还没有初始化）
+    global message_concurrent_semaphore
+    if message_concurrent_semaphore is None:
+        message_concurrent_semaphore = asyncio.Semaphore(max_concurrent_messages)
+        logger.info(f"消息并发控制信号量已初始化，最大并发消息数: {max_concurrent_messages}")
+    
+    logger.info(f"消息队列处理器已启动(并发模式:最多同时处理 {max_concurrent_messages} 条消息)")
     while True:
         try:
             # 检查是否处于限流状态
@@ -91,167 +125,238 @@ async def message_queue_processor():
             # 队列项格式: (task_func, args, kwargs, queue_notification, queue_id)
             queue_item = await message_processing_queue.get()
             
-            # 解包队列项(兼容旧格式)
-            queue_id = None
-            if len(queue_item) >= 5:
-                task_func, task_args, task_kwargs, queue_notification, queue_id = queue_item
-            elif len(queue_item) == 4:
-                task_func, task_args, task_kwargs, queue_notification = queue_item
-            else:
-                # 兼容旧格式(没有排队通知和队列ID)
-                task_func, task_args, task_kwargs = queue_item[:3]
-                queue_notification = None
+            # 获取信号量，控制并发数（如果达到最大并发数，这里会等待）
+            if message_concurrent_semaphore:
+                await message_concurrent_semaphore.acquire()
             
-            # 更新队列项状态为"正在处理"
-            global current_processing_queue_id
-            if queue_id and queue_tracker_lock:
+            # 创建异步任务来处理消息（不阻塞队列处理器）
+            async def process_single_message():
                 try:
-                    async with queue_tracker_lock:
-                        if queue_id in queue_item_tracker:
-                            queue_item_tracker[queue_id]['status'] = 'processing'
-                            current_processing_queue_id = queue_id
-                except Exception as e:
-                    logger.debug(f"更新队列项状态失败: {e}")
+                    await _process_message_item(queue_item, aria2_client)
+                finally:
+                    # 释放信号量
+                    if message_concurrent_semaphore:
+                        message_concurrent_semaphore.release()
+                    # 标记任务完成
+                    message_processing_queue.task_done()
             
-            queue_size = message_processing_queue.qsize()
-            if queue_size > 0:  # 只有当队列中还有任务时才记录
-                logger.debug(f"开始处理消息任务,队列中还有 {queue_size} 个任务等待处理")
+            # 在后台处理消息（不等待完成）
+            loop = asyncio.get_event_loop()
+            loop.create_task(process_single_message())
             
-            # 等待排队通知发送完成（如果有）
-            queue_reply_msg = None
-            if queue_notification:
-                try:
-                    queue_reply_msg = await queue_notification
-                except Exception as e:
-                    logger.error(f"获取排队通知消息失败: {e}", exc_info=True)
-            
-            try:
-                # 执行任务（严格串行，一个完成后再执行下一个）
-                # 将排队回复消息传递给处理函数（如果支持）
-                task_gids = []  # 记录本次处理添加的所有下载任务GID
-                
-                if task_args and task_kwargs:
-                    # 尝试传递排队回复消息
-                    if 'queue_reply_msg' not in task_kwargs:
-                        task_kwargs['queue_reply_msg'] = queue_reply_msg
-                    result = await task_func(*task_args, **task_kwargs)
-                    # 如果函数返回了任务GID列表，记录下来
-                    if isinstance(result, list):
-                        task_gids = result
-                elif task_args:
-                    # 对于只有位置参数的情况，需要修改函数签名来支持
-                    # 这里先尝试直接调用，如果函数支持queue_reply_msg参数，会在函数内部处理
-                    result = await task_func(*task_args, queue_reply_msg=queue_reply_msg)
-                    if isinstance(result, list):
-                        task_gids = result
-                elif task_kwargs:
-                    task_kwargs['queue_reply_msg'] = queue_reply_msg
-                    result = await task_func(**task_kwargs)
-                    if isinstance(result, list):
-                        task_gids = result
-                else:
-                    result = await task_func(queue_reply_msg=queue_reply_msg)
-                    if isinstance(result, list):
-                        task_gids = result
-                
-                # 更新队列项的任务GID列表
-                if queue_id and queue_tracker_lock and task_gids:
-                    try:
-                        async with queue_tracker_lock:
-                            if queue_id in queue_item_tracker:
-                                queue_item_tracker[queue_id]['task_gids'] = task_gids
-                    except Exception as e:
-                        logger.debug(f"更新队列项任务GID失败: {e}")
-                
-                # 如果有下载任务，等待所有任务完成（包括上传和清理）
-                if task_gids and aria2_client:
-                    await wait_for_tasks_completion(task_gids)
-                
-                # 更新队列项状态为"已完成"
-                if queue_id and queue_tracker_lock:
-                    try:
-                        async with queue_tracker_lock:
-                            if queue_id in queue_item_tracker:
-                                queue_item_tracker[queue_id]['status'] = 'completed'
-                            if current_processing_queue_id == queue_id:
-                                current_processing_queue_id = None
-                    except Exception as e:
-                        logger.debug(f"更新队列项完成状态失败: {e}")
-                
-                remaining = message_processing_queue.qsize()
-                if remaining > 0:
-                    logger.debug(f"消息任务处理完成，队列中还有 {remaining} 个任务等待")
-            except TypeError as e:
-                # 如果函数不支持queue_reply_msg参数，使用原始调用方式
-                if 'queue_reply_msg' in str(e):
-                    try:
-                        if task_args and task_kwargs:
-                            await task_func(*task_args, **task_kwargs)
-                        elif task_args:
-                            await task_func(*task_args)
-                        elif task_kwargs:
-                            await task_func(**task_kwargs)
-                        else:
-                            await task_func()
-                    except Exception as e2:
-                        # 检查是否是限流错误
-                        if is_flood_wait_error(e2):
-                            logger.warning(f"检测到限流错误,触发限流处理")
-                            await handle_flood_wait_start(e2)
-                            # 将当前任务重新放回队列头部
-                            await message_processing_queue.put((task_func, task_args, task_kwargs, queue_notification, queue_id))
-                        else:
-                            logger.error(f"处理消息队列任务失败: {e2}", exc_info=True)
-                else:
-                    logger.error(f"处理消息队列任务失败: {e}", exc_info=True)
-            except Exception as e:
-                # 检查是否是限流错误
-                if is_flood_wait_error(e):
-                    logger.warning(f"检测到限流错误,触发限流处理")
-                    await handle_flood_wait_start(e)
-                    # 将当前任务重新放回队列头部,等限流结束后继续处理
-                    # 注意:使用 put_nowait 而不是 put,避免阻塞
-                    try:
-                        # 创建新的队列,将当前任务放在最前面
-                        temp_items = [(task_func, task_args, task_kwargs, queue_notification, queue_id)]
-                        while not message_processing_queue.empty():
-                            try:
-                                item = message_processing_queue.get_nowait()
-                                temp_items.append(item)
-                            except:
-                                break
-                        # 重新放回队列
-                        for item in temp_items:
-                            message_processing_queue.put_nowait(item)
-                        logger.info(f"已将当前任务和 {len(temp_items)-1} 个等待任务重新放回队列")
-                    except Exception as requeue_error:
-                        logger.error(f"重新放回队列失败: {requeue_error}", exc_info=True)
-                else:
-                    logger.error(f"处理消息队列任务失败: {e}", exc_info=True)
-            finally:
-                # 更新队列项状态（即使出错也标记）
-                if queue_id and queue_tracker_lock:
-                    try:
-                        async with queue_tracker_lock:
-                            if queue_id in queue_item_tracker:
-                                if queue_item_tracker[queue_id]['status'] != 'completed':
-                                    queue_item_tracker[queue_id]['status'] = 'completed'  # 出错也标记为完成
-                            if current_processing_queue_id == queue_id:
-                                current_processing_queue_id = None
-                    except Exception as e:
-                        logger.debug(f"更新队列项最终状态失败: {e}")
-                
-                # 标记任务完成（必须在finally中执行，确保即使出错也标记完成）
-                message_processing_queue.task_done()
         except Exception as e:
             logger.error(f"消息队列处理器出错: {e}", exc_info=True)
             await asyncio.sleep(1)  # 出错后等待1秒再继续
 
 
+async def _process_message_item(queue_item, aria2_client):
+    """
+    处理单个消息队列项
+    """
+    # 延迟导入避免循环依赖
+    from .flood_control import flood_wait_status, handle_flood_wait_start, handle_flood_wait_end
+    from .task_tracker import wait_for_tasks_completion
+    
+    # 解包队列项(兼容旧格式)
+    queue_id = None
+    if len(queue_item) >= 5:
+        task_func, task_args, task_kwargs, queue_notification, queue_id = queue_item
+    elif len(queue_item) == 4:
+        task_func, task_args, task_kwargs, queue_notification = queue_item
+    else:
+        # 兼容旧格式(没有排队通知和队列ID)
+        task_func, task_args, task_kwargs = queue_item[:3]
+        queue_notification = None
+    
+    # 更新队列项状态为"正在处理"
+    global current_processing_queue_id
+    if queue_id and queue_tracker_lock:
+        try:
+            async with queue_tracker_lock:
+                if queue_id in queue_item_tracker:
+                    queue_item_tracker[queue_id]['status'] = 'processing'
+                    current_processing_queue_id = queue_id
+        except Exception as e:
+            logger.debug(f"更新队列项状态失败: {e}")
+    
+    queue_size = message_processing_queue.qsize()
+    if queue_size > 0:  # 只有当队列中还有任务时才记录
+        logger.debug(f"开始处理消息任务,队列中还有 {queue_size} 个任务等待处理")
+    
+    # 等待排队通知发送完成（如果有）
+    queue_reply_msg = None
+    if queue_notification:
+        try:
+            queue_reply_msg = await queue_notification
+        except Exception as e:
+            logger.error(f"获取排队通知消息失败: {e}", exc_info=True)
+    
+    try:
+        # 执行任务
+        # 将排队回复消息传递给处理函数（如果支持）
+        task_gids = []  # 记录本次处理添加的所有下载任务GID
+        
+        if task_args and task_kwargs:
+            # 尝试传递排队回复消息
+            if 'queue_reply_msg' not in task_kwargs:
+                task_kwargs['queue_reply_msg'] = queue_reply_msg
+            result = await task_func(*task_args, **task_kwargs)
+            # 如果函数返回了任务GID列表，记录下来
+            if isinstance(result, list):
+                task_gids = result
+        elif task_args:
+            # 对于只有位置参数的情况，需要修改函数签名来支持
+            # 这里先尝试直接调用，如果函数支持queue_reply_msg参数，会在函数内部处理
+            result = await task_func(*task_args, queue_reply_msg=queue_reply_msg)
+            if isinstance(result, list):
+                task_gids = result
+        elif task_kwargs:
+            task_kwargs['queue_reply_msg'] = queue_reply_msg
+            result = await task_func(**task_kwargs)
+            if isinstance(result, list):
+                task_gids = result
+        else:
+            result = await task_func(queue_reply_msg=queue_reply_msg)
+            if isinstance(result, list):
+                task_gids = result
+        
+        # 更新队列项的任务GID列表
+        if queue_id and queue_tracker_lock and task_gids:
+            try:
+                async with queue_tracker_lock:
+                    if queue_id in queue_item_tracker:
+                        queue_item_tracker[queue_id]['task_gids'] = task_gids
+            except Exception as e:
+                logger.debug(f"更新队列项任务GID失败: {e}")
+        
+        # 如果有下载任务，根据配置决定是否等待任务完成
+        if task_gids and aria2_client:
+            # 检查是否启用了跳过小文件功能
+            # 如果启用了，允许并发下载，但需要控制并发数量，避免 aria2 过载
+            # 如果未启用，等待所有任务完成（包括上传和清理），保持串行处理
+            try:
+                from configer import get_config_value
+                skip_small_files = get_config_value('SKIP_SMALL_FILES', False)
+                
+                if skip_small_files:
+                    # 启用小文件跳过时，不等待任务完成，但需要控制并发数量
+                    # 检查 aria2 的任务数，如果任务数过多，等待一段时间再处理下一个队列项
+                    try:
+                        # 从统一函数获取最大并发数
+                        from .utils import get_aria2_max_concurrent_downloads
+                        max_concurrent = await get_aria2_max_concurrent_downloads()
+                        
+                        # 获取当前任务数
+                        active_tasks = await aria2_client.tell_active()
+                        waiting_tasks = await aria2_client.tell_waiting(0, 100)
+                        current_count = len(active_tasks) + len(waiting_tasks)
+                        
+                        # 如果任务数接近或超过限制，等待一段时间再处理下一个队列项
+                        # 使用 80% 的阈值，留一些缓冲空间
+                        threshold = int(max_concurrent * 0.8)
+                        if current_count >= threshold:
+                            wait_time = 3.0  # 等待3秒
+                            logger.debug(
+                                f"已启用小文件跳过，但 aria2 任务数较多 ({current_count}/{max_concurrent})，"
+                                f"等待 {wait_time} 秒后再处理下一个队列项（{len(task_gids)} 个任务将在后台继续）"
+                            )
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.debug(
+                                f"已启用小文件跳过，aria2 任务数正常 ({current_count}/{max_concurrent})，"
+                                f"立即处理下一个队列项（{len(task_gids)} 个任务将在后台继续）"
+                            )
+                    except Exception as e:
+                        # 如果检查失败，等待一小段时间再继续（保守策略）
+                        logger.debug(f"检查 aria2 任务数失败，等待 2 秒后再处理下一个队列项: {e}")
+                        await asyncio.sleep(2.0)
+                else:
+                    # 未启用小文件跳过时，等待所有任务完成（保持原有串行逻辑）
+                    await wait_for_tasks_completion(task_gids)
+            except Exception as e:
+                # 如果无法获取配置，使用默认行为（等待任务完成，保持串行）
+                logger.debug(f"无法获取配置，使用默认行为（等待任务完成）: {e}")
+                await wait_for_tasks_completion(task_gids)
+        
+        # 更新队列项状态为"已完成"
+        if queue_id and queue_tracker_lock:
+            try:
+                async with queue_tracker_lock:
+                    if queue_id in queue_item_tracker:
+                        queue_item_tracker[queue_id]['status'] = 'completed'
+                    if current_processing_queue_id == queue_id:
+                        current_processing_queue_id = None
+            except Exception as e:
+                logger.debug(f"更新队列项完成状态失败: {e}")
+        
+        remaining = message_processing_queue.qsize()
+        if remaining > 0:
+            logger.debug(f"消息任务处理完成，队列中还有 {remaining} 个任务等待")
+    except TypeError as e:
+        # 如果函数不支持queue_reply_msg参数，使用原始调用方式
+        if 'queue_reply_msg' in str(e):
+            try:
+                if task_args and task_kwargs:
+                    await task_func(*task_args, **task_kwargs)
+                elif task_args:
+                    await task_func(*task_args)
+                elif task_kwargs:
+                    await task_func(**task_kwargs)
+                else:
+                    await task_func()
+            except Exception as e2:
+                # 检查是否是限流错误
+                if is_flood_wait_error(e2):
+                    logger.warning(f"检测到限流错误,触发限流处理")
+                    await handle_flood_wait_start(e2)
+                    # 将当前任务重新放回队列头部
+                    await message_processing_queue.put((task_func, task_args, task_kwargs, queue_notification, queue_id))
+                else:
+                    logger.error(f"处理消息队列任务失败: {e2}", exc_info=True)
+        else:
+            logger.error(f"处理消息队列任务失败: {e}", exc_info=True)
+    except Exception as e:
+        # 检查是否是限流错误
+        if is_flood_wait_error(e):
+            logger.warning(f"检测到限流错误,触发限流处理")
+            await handle_flood_wait_start(e)
+            # 将当前任务重新放回队列头部,等限流结束后继续处理
+            # 注意:使用 put_nowait 而不是 put,避免阻塞
+            try:
+                # 创建新的队列,将当前任务放在最前面
+                temp_items = [(task_func, task_args, task_kwargs, queue_notification, queue_id)]
+                while not message_processing_queue.empty():
+                    try:
+                        item = message_processing_queue.get_nowait()
+                        temp_items.append(item)
+                    except:
+                        break
+                # 重新放回队列
+                for item in temp_items:
+                    message_processing_queue.put_nowait(item)
+                logger.info(f"已将当前任务和 {len(temp_items)-1} 个等待任务重新放回队列")
+            except Exception as requeue_error:
+                logger.error(f"重新放回队列失败: {requeue_error}", exc_info=True)
+        else:
+            logger.error(f"处理消息队列任务失败: {e}", exc_info=True)
+    finally:
+        # 更新队列项状态（即使出错也标记）
+        if queue_id and queue_tracker_lock:
+            try:
+                async with queue_tracker_lock:
+                    if queue_id in queue_item_tracker:
+                        if queue_item_tracker[queue_id]['status'] != 'completed':
+                            queue_item_tracker[queue_id]['status'] = 'completed'  # 出错也标记为完成
+                    if current_processing_queue_id == queue_id:
+                        current_processing_queue_id = None
+            except Exception as e:
+                logger.debug(f"更新队列项最终状态失败: {e}")
+
+
 def enqueue_message_task(task_func, *args, **kwargs):
     """
-    将消息处理任务加入队列（严格串行执行）
-    每条转发给bot的信息都当成一条队列数据，如果当前队列没有执行完，等待队列就不进入
+    将消息处理任务加入队列（支持并发处理，但限制同时处理的消息数量）
+    每条转发给bot的信息都当成一条队列数据，通过信号量控制并发数
     
     Args:
         task_func: 要执行的异步函数
@@ -409,12 +514,27 @@ async def get_queue_status():
             'current_processing': None,
             'waiting_count': 0,
             'waiting_items': [],
-            'queue_size': 0
+            'queue_size': 0,
+            'processing_count': 0,
+            'max_concurrent_messages': 5
         }
     
     try:
         async with queue_tracker_lock:
-            # 获取当前正在处理的项目
+            # 获取当前正在处理的项目列表
+            processing_items = []
+            for queue_id, item_info in queue_item_tracker.items():
+                if item_info['status'] == 'processing':
+                    processing_items.append({
+                        'queue_id': queue_id,
+                        'title': item_info['title'],
+                        'type': item_info['type'],
+                        'media_group_total': item_info.get('media_group_total', 0),
+                        'message_id': item_info.get('message_id'),
+                        'added_at': item_info.get('added_at', 0)
+                    })
+            
+            # 获取当前正在处理的项目（兼容旧代码）
             current_item = None
             if current_processing_queue_id and current_processing_queue_id in queue_item_tracker:
                 current_item = queue_item_tracker[current_processing_queue_id].copy()
@@ -433,9 +553,17 @@ async def get_queue_status():
             
             # 按添加时间排序
             waiting_items.sort(key=lambda x: x['added_at'])
+            processing_items.sort(key=lambda x: x['added_at'])
             
             # 获取队列大小
             queue_size = message_processing_queue.qsize() if message_processing_queue else 0
+            
+            # 获取最大并发消息数配置
+            try:
+                from configer import get_config_value
+                max_concurrent_messages = get_config_value('MAX_CONCURRENT_MESSAGES', 5)
+            except Exception:
+                max_concurrent_messages = 5
             
             # 添加限流状态信息
             flood_wait_info = None
@@ -450,9 +578,12 @@ async def get_queue_status():
             
             return {
                 'current_processing': current_item,
+                'processing_count': len(processing_items),
+                'processing_items': processing_items,
                 'waiting_count': len(waiting_items),
                 'waiting_items': waiting_items,
                 'queue_size': queue_size,
+                'max_concurrent_messages': max_concurrent_messages,
                 'flood_wait': flood_wait_info  # 新增限流状态
             }
     except Exception as e:
@@ -461,5 +592,7 @@ async def get_queue_status():
             'current_processing': None,
             'waiting_count': 0,
             'waiting_items': [],
-            'queue_size': 0
+            'queue_size': 0,
+            'processing_count': 0,
+            'max_concurrent_messages': 5
         }

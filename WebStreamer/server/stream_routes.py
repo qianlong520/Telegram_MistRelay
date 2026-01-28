@@ -15,6 +15,7 @@ from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine
 from WebStreamer.bot import multi_clients, work_loads, channel_accessible_clients
 from WebStreamer.server.exceptions import FIleNotFound, InvalidHash
+from WebStreamer.server.ws_manager import ws_manager
 from WebStreamer import Var, utils, StartTime, __version__, StreamBot
 from db import fetch_recent_downloads, get_all_configs, get_config, set_config
 import configer
@@ -692,6 +693,9 @@ async def update_config_handler(request: web.Request):
             'UP_ONEDRIVE': ('bool', 'rclone', '是否启用rclone上传到OneDrive'),
             'RCLONE_REMOTE': ('string', 'rclone', 'rclone远程名称'),
             'RCLONE_PATH': ('string', 'rclone', 'OneDrive目标路径'),
+            'UP_GOOGLE_DRIVE': ('bool', 'rclone', '是否上传到Google Drive'),
+            'GOOGLE_DRIVE_REMOTE': ('string', 'rclone', 'Google Drive Rclone远程名称（默认gdrive），需与rclone.conf中的配置名称一致'),
+            'GOOGLE_DRIVE_PATH': ('string', 'rclone', 'Google Drive上传路径（默认/Downloads）'),
             'AUTO_DELETE_AFTER_UPLOAD': ('bool', 'rclone', '上传后自动删除本地文件'),
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
             'PROXY_IP': ('string', 'download', '代理IP'),
@@ -700,6 +704,7 @@ async def update_config_handler(request: web.Request):
             'MIN_FILE_SIZE_MB': ('int', 'download', '最小文件大小（MB），小于此大小的文件将被跳过'),
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
             'RPC_URL': ('string', 'aria2', 'Aria2 RPC URL'),
+            'MAX_CONCURRENT_UPLOADS': ('int', 'upload', '最大并发上传数（默认10）'),
             'ENABLE_STREAM': ('bool', 'stream', '是否启用直链功能'),
             'BIN_CHANNEL': ('string', 'stream', '日志频道ID'),
             'STREAM_PORT': ('int', 'stream', 'Web服务器端口'),
@@ -774,13 +779,18 @@ async def update_config_handler(request: web.Request):
 
 @routes.post("/api/config/reload")
 async def reload_config_handler(request: web.Request):
-    """手动触发配置重载"""
+    """手动触发配置重载（从config.yml重新导入到数据库）"""
     try:
+        from db import init_config_from_yaml
+        # 先从config.yml重新导入到数据库
+        imported = init_config_from_yaml()
+        # 然后重新加载配置缓存
         configer.reload_config()
-        logger.info("配置已手动重载")
+        logger.info("配置已手动重载（从config.yml导入）")
         return web.json_response({
             "success": True,
-            "message": "配置已重新加载"
+            "message": "配置已从config.yml重新导入并加载",
+            "imported": imported
         })
     except Exception as e:
         logger.error(f"配置重载失败: {e}", exc_info=True)
@@ -830,6 +840,51 @@ async def downloads_api_handler(request: web.Request):
         })
 
 
+@routes.get("/api/downloads/statistics", allow_head=True)
+async def downloads_statistics_handler(request: web.Request):
+    """
+    API接口：返回下载统计信息
+    """
+    try:
+        from db import get_download_statistics
+        stats = get_download_statistics()
+        return web.json_response({
+            "success": True,
+            "data": stats
+        })
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"获取下载统计失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.delete("/api/downloads/all")
+async def delete_all_downloads_handler(request: web.Request):
+    """
+    API接口：删除所有下载记录、上传记录和媒体记录
+    """
+    try:
+        from db import delete_all_downloads
+        result = delete_all_downloads()
+        return web.json_response({
+            "success": True,
+            "message": f"已删除 {result['deleted_downloads']} 条下载记录、{result['deleted_uploads']} 条上传记录和 {result['deleted_media']} 条媒体记录",
+            "data": result
+        })
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"删除所有记录失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
 @routes.get("/api/monitor/trend", allow_head=True)
 async def monitor_trend_handler(request: web.Request):
     """
@@ -848,6 +903,124 @@ async def monitor_trend_handler(request: web.Request):
             "success": False,
             "error": str(e)
         }, status=500)
+
+
+@routes.get("/api/uploads/statistics", allow_head=True)
+async def uploads_statistics_handler(request: web.Request):
+    """
+    API接口：返回上传统计信息
+    """
+    try:
+        from db import get_upload_statistics
+        stats = get_upload_statistics()
+        return web.json_response({
+            "success": True,
+            "data": stats
+        })
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"获取上传统计失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.get("/api/uploads", allow_head=True)
+async def uploads_api_handler(request: web.Request):
+    """
+    API接口：返回上传记录JSON数据
+    
+    支持查询参数:
+      - limit: 返回的最大记录数（默认 100，最大 500）
+      - status: 按状态过滤（uploading/completed/failed/pending等）
+      - upload_target: 按上传目标过滤（onedrive/telegram）
+    """
+    try:
+        limit_param = int(request.query.get("limit", "100"))
+    except ValueError:
+        limit_param = 100
+    limit_param = max(1, min(limit_param, 500))
+    
+    status_filter = request.query.get("status")
+    upload_target_filter = request.query.get("upload_target")
+    
+    try:
+        from db import fetch_recent_uploads
+        records = fetch_recent_uploads(
+            limit=limit_param,
+            status=status_filter,
+            upload_target=upload_target_filter
+        )
+        return web.json_response({
+            "success": True,
+            "limit": limit_param,
+            "count": len(records),
+            "data": records
+        })
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"获取上传记录失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.get("/api/ws/status")
+async def ws_status_handler(request: web.Request):
+    """
+    WebSocket 端点：实时推送下载/上传/清理状态更新
+    """
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    
+    try:
+        # 添加连接到管理器
+        await ws_manager.add_connection(ws)
+        
+        # 发送初始状态
+        try:
+            from db import get_download_statistics, get_upload_statistics
+            download_stats = get_download_statistics()
+            upload_stats = get_upload_statistics()
+            
+            await ws.send_json({
+                "type": "initial",
+                "data": {
+                    "downloads": download_stats,
+                    "uploads": upload_stats
+                }
+            })
+        except Exception as e:
+            logger.error(f"发送初始状态失败: {e}")
+        
+        # 保持连接，等待客户端关闭
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                # 可以处理客户端发送的消息（如果需要）
+                try:
+                    data = json.loads(msg.data)
+                    if data.get("type") == "ping":
+                        await ws.send_json({"type": "pong"})
+                except:
+                    pass
+            elif msg.type == web.WSMsgType.ERROR:
+                logger.error(f"WebSocket 错误: {ws.exception()}")
+                break
+            elif msg.type == web.WSMsgType.CLOSE:
+                break
+                
+    except Exception as e:
+        logger.error(f"WebSocket 连接错误: {e}", exc_info=True)
+    finally:
+        # 移除连接
+        await ws_manager.remove_connection(ws)
+        await ws.close()
+    
+    return ws
 
 
 @routes.get("/api/queue", allow_head=True)

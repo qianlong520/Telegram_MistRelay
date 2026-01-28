@@ -53,17 +53,49 @@
             </div>
           </template>
           <el-form :model="configs.rclone" label-width="180px">
+            <el-divider content-position="left">OneDrive配置</el-divider>
             <el-form-item label="启用OneDrive上传">
               <el-switch v-model="configs.rclone.UP_ONEDRIVE" />
             </el-form-item>
-            <el-form-item label="Rclone远程名称">
+            <el-form-item label="Rclone远程名称" v-if="configs.rclone.UP_ONEDRIVE">
               <el-input v-model="configs.rclone.RCLONE_REMOTE" />
+              <div class="el-form-item__help">OneDrive的rclone远程名称（默认：onedrive）</div>
             </el-form-item>
-            <el-form-item label="OneDrive路径">
+            <el-form-item label="OneDrive路径" v-if="configs.rclone.UP_ONEDRIVE">
               <el-input v-model="configs.rclone.RCLONE_PATH" />
+              <div class="el-form-item__help">OneDrive上的目标路径（默认：/Downloads）</div>
             </el-form-item>
+            
+            <el-divider content-position="left">Google Drive配置</el-divider>
+            <el-form-item label="启用Google Drive上传">
+              <el-switch v-model="configs.rclone.UP_GOOGLE_DRIVE" />
+            </el-form-item>
+            <el-alert
+              v-if="configs.rclone.UP_GOOGLE_DRIVE"
+              type="info"
+              :closable="false"
+              style="margin-bottom: 20px"
+            >
+              <template #title>
+                <div style="font-size: 13px">
+                  <strong>提示：</strong>Google Drive 上传使用 rclone，需要在 rclone 配置文件中配置 OAuth2 token。
+                  <br />请确保已在 <code>rclone.conf</code> 中配置了名为 <code>{{ configs.rclone.GOOGLE_DRIVE_REMOTE || 'gdrive' }}</code> 的远程配置。
+                </div>
+              </template>
+            </el-alert>
+            <el-form-item label="Google Drive远程名称" v-if="configs.rclone.UP_GOOGLE_DRIVE">
+              <el-input v-model="configs.rclone.GOOGLE_DRIVE_REMOTE" />
+              <div class="el-form-item__help">Google Drive的rclone远程名称（默认：gdrive），需与rclone.conf中的配置名称一致</div>
+            </el-form-item>
+            <el-form-item label="Google Drive路径" v-if="configs.rclone.UP_GOOGLE_DRIVE">
+              <el-input v-model="configs.rclone.GOOGLE_DRIVE_PATH" />
+              <div class="el-form-item__help">Google Drive上的目标路径（默认：/Downloads）</div>
+            </el-form-item>
+            
+            <el-divider content-position="left">通用设置</el-divider>
             <el-form-item label="上传后删除本地文件">
               <el-switch v-model="configs.rclone.AUTO_DELETE_AFTER_UPLOAD" />
+              <div class="el-form-item__help">上传成功后自动删除本地文件以节省磁盘空间</div>
             </el-form-item>
           </el-form>
         </el-card>
@@ -234,6 +266,9 @@ const configs = ref({
     UP_ONEDRIVE: false,
     RCLONE_REMOTE: 'onedrive',
     RCLONE_PATH: '/Downloads',
+    UP_GOOGLE_DRIVE: false,
+    GOOGLE_DRIVE_REMOTE: 'gdrive',
+    GOOGLE_DRIVE_PATH: '/Downloads',
     AUTO_DELETE_AFTER_UPLOAD: true
   },
   download: {

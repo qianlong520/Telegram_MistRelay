@@ -84,3 +84,71 @@ export interface TrendResponse {
 export function getSystemTrend(): Promise<TrendResponse> {
   return api.get<TrendResponse>('/monitor/trend').then(response => response.data)
 }
+
+export interface DownloadStatistics {
+  total: number
+  completed: number
+  downloading: number
+  failed: number
+  pending: number
+  waiting: number
+  total_size: number
+  completed_size: number
+}
+
+export interface DownloadStatisticsResponse {
+  success: boolean
+  data: DownloadStatistics
+  error?: string
+}
+
+export function getDownloadStatistics(): Promise<DownloadStatisticsResponse> {
+  return api.get<DownloadStatisticsResponse>('/downloads/statistics').then(response => response.data)
+}
+
+export interface DeleteAllDownloadsResponse {
+  success: boolean
+  message?: string
+  data?: {
+    deleted_downloads: number
+    deleted_media: number
+  }
+  error?: string
+}
+
+export function deleteAllDownloads(): Promise<DeleteAllDownloadsResponse> {
+  return api.delete<DeleteAllDownloadsResponse>('/downloads/all').then(response => response.data)
+}
+
+export interface UploadStatistics {
+  total: number
+  uploading: number
+  completed: number
+  failed: number
+  pending: number
+  cleaned: number
+}
+
+export interface UploadStatisticsResponse {
+  success: boolean
+  data: UploadStatistics
+  error?: string
+}
+
+export function getUploadStatistics(): Promise<UploadStatisticsResponse> {
+  return api.get<UploadStatisticsResponse>('/uploads/statistics').then(response => response.data)
+}
+
+export interface UploadsResponse {
+  success: boolean
+  limit: number
+  count: number
+  data: UploadRecord[]
+  error?: string
+}
+
+export function getUploads(limit = 100, status?: string, uploadTarget?: string): Promise<UploadsResponse> {
+  return api.get<UploadsResponse>('/uploads', {
+    params: { limit, status, upload_target: uploadTarget }
+  }).then(response => response.data)
+}

@@ -11,5 +11,16 @@ token = {"access_token":"your_access_token","token_type":"Bearer","refresh_token
 drive_id = your_drive_id
 drive_type = personal
 
-# 其他云存储配置示例(Google Drive, Dropbox等)
+# Google Drive配置示例
+[gdrive]
+type = drive
+scope = drive
+# 使用API Key进行配置（需要先通过 rclone config 配置OAuth2）
+# 请使用 rclone config 命令进行配置，参考: https://rclone.org/drive/
+# 配置完成后，rclone会自动生成token
+token = {"access_token":"your_access_token","token_type":"Bearer","refresh_token":"your_refresh_token","expiry":"2026-01-01T00:00:00Z"}
+client_id = your_client_id
+client_secret = your_client_secret
+
+# 其他云存储配置示例(Dropbox等)
 # 请参考 rclone 官方文档: https://rclone.org/docs/

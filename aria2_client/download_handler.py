@@ -6,7 +6,7 @@ import os
 import time
 from typing import Optional
 
-from configer import ADMIN_ID, UP_TELEGRAM, UP_ONEDRIVE, FORWARD_ID, AUTO_DELETE_AFTER_UPLOAD
+from configer import ADMIN_ID, UP_TELEGRAM, UP_ONEDRIVE, UP_GOOGLE_DRIVE, FORWARD_ID, AUTO_DELETE_AFTER_UPLOAD, GOOGLE_DRIVE_REMOTE, GOOGLE_DRIVE_PATH
 from util import get_file_name, byte2_readable, hum_convert, progress
 from db import (
     mark_download_completed, mark_download_failed, get_download_id_by_gid,
@@ -145,51 +145,24 @@ class DownloadHandler:
                 speed = hum_convert(int(downloadSpeed))
                 prog = progress(int(totalLength), int(completedLength))
                 
-                if status != 'complete':
-                    new_message_text = (
-                        f'📥 <b>正在下载</b>\n\n'
-                        f'📁 <b>文件:</b> <code>{file_name}</code>\n'
-                        f'📂 <b>路径:</b> <code>{dir_path}</code>\n\n'
-                        f'📊 <b>进度:</b> {prog}\n'
-                        f'💾 <b>大小:</b> {size}\n'
-                        f'⚡ <b>速度:</b> {speed}/s'
+                # 更新数据库中的下载进度（用于 WebSocket 推送）
+                try:
+                    from db import update_download_progress
+                    update_download_progress(
+                        gid,
+                        completed_length=int(completedLength) if completedLength else None,
+                        total_length=int(totalLength) if totalLength else None,
+                        download_speed=int(downloadSpeed) if downloadSpeed else None
                     )
-                    # 第一次运行或消息内容不同时才更新
-                    if first_run or new_message_text != last_message_text:
-                        try:
-                            if first_run and msg is None:
-                                # 第一次运行且没有消息对象，立即发送新消息
-                                if self.bot:
-                                    msg = await self.bot.send_message(ADMIN_ID, new_message_text, parse_mode='html')
-                                    # 保存消息对象到字典中，供后续使用
-                                    self.download_messages[gid] = msg
-                                    first_run = False
-                                    last_message_text = new_message_text
-                            elif msg:
-                                # 编辑现有消息
-                                try:
-                                    msg = await self.bot.edit_message(msg, new_message_text, parse_mode='html')
-                                    # 更新保存的消息对象
-                                    self.download_messages[gid] = msg
-                                    first_run = False
-                                    last_message_text = new_message_text
-                                except Exception as edit_err:
-                                    # 如果编辑失败，尝试从字典中获取最新消息
-                                    if gid in self.download_messages and self.download_messages[gid]:
-                                        try:
-                                            msg = self.download_messages[gid]
-                                            msg = await self.bot.edit_message(msg, new_message_text, parse_mode='html')
-                                            self.download_messages[gid] = msg
-                                            first_run = False
-                                            last_message_text = new_message_text
-                                        except:
-                                            pass
-                        except Exception as e:
-                            # 忽略"消息内容未修改"的错误
-                            if "not modified" not in str(e).lower():
-                                print(f"更新下载进度消息失败: {e}")
+                except Exception as e:
+                    # 静默失败，不影响主流程
+                    pass
+                
+                if status != 'complete':
+                    # 静默处理：不再发送Telegram消息，所有信息通过WebSocket推送到Web界面
+                    # WebSocket推送已在 update_download_progress 中实现
                     
-                    # 第一次发送消息后，等待指定间隔再更新
+                    # 等待指定间隔再更新
                     await asyncio.sleep(DOWNLOAD_PROGRESS_UPDATE_INTERVAL)
                 else:
                     # 下载完成，返回消息对象供后续使用
@@ -344,19 +317,8 @@ class DownloadHandler:
                         except Exception as e:
                             print(f"记录上传失败出错: {e}")
                     
-                    if self.bot:
-                        if msg:
-                            try:
-                                error_message = (
-                                    f'❌ <b>文件不存在</b>\n\n'
-                                    f'📁 <b>文件:</b> <code>{os.path.basename(path)}</code>\n'
-                                    f'📂 <b>路径:</b> <code>{path}</code>\n\n'
-                                    f'⚠️ 文件下载完成但文件不存在，可能已被删除或路径错误\n'
-                                    f'🔍 <b>目录检查:</b> {file_list_str}'
-                                )
-                                await self.bot.edit_message(msg, error_message, parse_mode='html')
-                            except Exception as e:
-                                print(f"更新错误消息失败: {e}")
+                    # 静默处理：不再发送Telegram消息，错误信息已通过数据库记录
+                    # WebSocket推送已在 mark_upload_failed 中实现
                     continue
                 
                 # 发送下载完成消息
@@ -369,76 +331,71 @@ class DownloadHandler:
                 except:
                     pass
                 
-                # 标记数据库中的下载任务为完成
+                # 标记数据库中的下载任务为完成（会自动触发WebSocket推送）
                 try:
                     total_length = int(tellStatus.get("totalLength") or 0)
                     mark_download_completed(gid, actual_path, total_length or None)
                 except Exception as db_e:
                     print(f"更新数据库下载完成状态出错: {db_e}")
 
-                if msg:
-                    try:
-                        complete_text = (
-                            f'✅ <b>下载完成</b>\n\n'
-                            f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                            f'📂 <b>路径:</b> <code>{actual_path}</code>'
-                        )
-                        if file_size:
-                            complete_text += f'\n💾 <b>大小:</b> {file_size}'
-                        if actual_path != path:
-                            complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
-                        msg = await self.bot.edit_message(msg, complete_text, parse_mode='html')
-                        self.download_messages[gid] = msg
-                    except Exception as e:
-                        print(f"更新下载完成消息失败: {e}")
-                        # 如果编辑失败，发送新消息
-                        complete_text = (
-                            f'✅ <b>下载完成</b>\n\n'
-                            f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                            f'📂 <b>路径:</b> <code>{actual_path}</code>'
-                        )
-                        if file_size:
-                            complete_text += f'\n💾 <b>大小:</b> {file_size}'
-                        if actual_path != path:
-                            complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
-                        msg = await self.bot.send_message(ADMIN_ID, complete_text, parse_mode='html')
-                        self.download_messages[gid] = msg
-                else:
-                    # 如果没有保存的消息，发送新消息
-                    complete_text = (
-                        f'✅ <b>下载完成</b>\n\n'
-                        f'📁 <b>文件:</b> <code>{file_name_display}</code>\n'
-                        f'📂 <b>路径:</b> <code>{actual_path}</code>'
-                    )
-                    if file_size:
-                        complete_text += f'\n💾 <b>大小:</b> {file_size}'
-                    if actual_path != path:
-                        complete_text += f'\n\n💡 <b>注意:</b> 文件路径已自动调整（原始路径: <code>{path}</code>）'
-                    msg = await self.bot.send_message(ADMIN_ID, complete_text, parse_mode='html')
-                    self.download_messages[gid] = msg
+                # 静默处理：不再发送Telegram消息，所有信息通过WebSocket推送到Web界面
+                # WebSocket推送已在 mark_download_completed 中实现
                 
-                # 根据配置选择上传方式
-                if UP_ONEDRIVE:
+                # 根据配置选择上传方式（动态获取配置值，支持热重载）
+                from configer import get_config_value
+                up_onedrive = get_config_value('UP_ONEDRIVE', False)
+                up_google_drive = get_config_value('UP_GOOGLE_DRIVE', False)
+                up_telegram = get_config_value('UP_TELEGRAM', False)
+                
+                print(f"[上传选择] UP_ONEDRIVE={up_onedrive}, UP_GOOGLE_DRIVE={up_google_drive}, UP_TELEGRAM={up_telegram}")
+                
+                if up_onedrive:
                     # 创建上传记录
                     upload_id = None
                     try:
                         download_id = get_download_id_by_gid(gid)
                         if download_id:
-                            # 预估远程路径
-                            from configer import RCLONE_REMOTE, RCLONE_PATH
+                            # 预估远程路径（动态获取配置）
+                            from configer import get_config_value
+                            rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                            rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
                             file_name_display = os.path.basename(actual_path)
-                            remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}/{file_name_display}"
+                            remote_path = f"{rclone_remote}:{rclone_path}/{file_name_display}"
                             upload_id = create_upload(download_id, 'onedrive', remote_path=remote_path)
                             print(f"创建上传记录成功，ID: {upload_id}")
                     except Exception as e:
                         print(f"创建上传记录失败: {e}")
 
                     # 使用rclone上传到OneDrive，异步非阻塞执行
+                    # 静默处理：不再传递msg参数，所有信息通过WebSocket推送
                     asyncio.create_task(
-                        self.upload_handler.upload_to_onedrive(actual_path, msg, gid, upload_id=upload_id)
+                        self.upload_handler.upload_to_onedrive(actual_path, None, gid, upload_id=upload_id)
                     )
                     print(f"[上传] 已启动OneDrive上传任务(异步): {os.path.basename(actual_path)}")
-                elif UP_TELEGRAM:
+                elif up_google_drive:
+                    # 创建上传记录
+                    upload_id = None
+                    try:
+                        download_id = get_download_id_by_gid(gid)
+                        if download_id:
+                            # 预估远程路径（动态获取配置）
+                            from configer import get_config_value
+                            gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                            gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                            file_name_display = os.path.basename(actual_path)
+                            remote_path = f"{gdrive_remote}:{gdrive_path}/{file_name_display}"
+                            upload_id = create_upload(download_id, 'gdrive', remote_path=remote_path)
+                            print(f"创建上传记录成功，ID: {upload_id}")
+                    except Exception as e:
+                        print(f"创建上传记录失败: {e}")
+
+                    # 使用rclone上传到Google Drive，异步非阻塞执行
+                    # 静默处理：不再传递msg参数，所有信息通过WebSocket推送
+                    asyncio.create_task(
+                        self.upload_handler.upload_to_google_drive(actual_path, None, gid, upload_id=upload_id)
+                    )
+                    print(f"[上传] 已启动Google Drive上传任务(异步): {os.path.basename(actual_path)}")
+                elif up_telegram:
                     # 创建上传记录
                     upload_id = None
                     try:
@@ -465,15 +422,7 @@ class DownloadHandler:
         """
         gid = result['params'][0]['gid']
         print(f"===========下载 暂停 任务id:{gid}")
-        tellStatus = await tell_status_func(gid)
-        filename = get_file_name(tellStatus)
-        if self.bot:
-            pause_msg = (
-                f'⏸️ <b>下载已暂停</b>\n\n'
-                f'📁 <b>文件:</b> <code>{filename}</code>\n'
-                f'🆔 <b>任务ID:</b> <code>{gid}</code>'
-            )
-            await self.bot.send_message(ADMIN_ID, pause_msg, parse_mode='html')
+        # 静默处理：不再发送Telegram消息，暂停状态通过WebSocket推送
     
     async def on_download_error(self, result, tell_status_func):
         """
@@ -488,8 +437,12 @@ class DownloadHandler:
         errorCode = tellStatus['errorCode']
         errorMessage = tellStatus['errorMessage']
         print(f'===========下载 错误 任务id:{gid} 错误码: {errorCode} 错误信息{errorMessage}')
-        if self.bot:
-            if errorCode == '12':
-                await self.bot.send_message(ADMIN_ID, '任务已经在下载,可以删除任务后重新添加')
-            else:
-                await self.bot.send_message(ADMIN_ID, errorMessage)
+        
+        # 标记数据库中的下载任务为失败（会自动触发WebSocket推送）
+        try:
+            mark_download_failed(gid, errorMessage)
+        except Exception as db_e:
+            print(f"更新数据库下载失败状态出错: {db_e}")
+        
+        # 静默处理：不再发送Telegram消息，错误信息已通过数据库记录
+        # WebSocket推送已在 mark_download_failed 中实现

@@ -40,12 +40,8 @@ async def process_media_group(messages: list, queue_reply_msg=None):
     
     first_msg = messages[0]
     
-    # 如果有排队通知，先删除它（因为我们要发送实际的处理结果）
-    if queue_reply_msg:
-        try:
-            await queue_reply_msg.delete()
-        except Exception as e:
-            logger.debug(f"删除排队通知失败: {e}")
+    # 保留排队通知消息，用于清理完成后更新（不再删除）
+    # 如果后续没有创建下载任务，会在发送直链信息后删除
     # 生成唯一的媒体组ID（使用时间戳和第一条消息ID）
     media_group_id = f"mg_{first_msg.chat.id}_{first_msg.media_group_id}_{first_msg.id}"
     
@@ -180,61 +176,8 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 success_count = 0
                 failed_count = 0
                 
-                # 从aria2配置获取最大并发数
-                try:
-                    global_options = await aria2_client.get_global_option()
-                    max_concurrent = int(global_options.get('max-concurrent-downloads', 5))
-                except Exception as e:
-                    logger.debug(f"无法获取aria2最大并发数配置，使用默认值5: {e}")
-                    max_concurrent = 5  # aria2默认最大并发数
-                
-                max_wait_time = 60  # 最大等待时间（秒），增加到60秒
-                
-                async def wait_for_slot():
-                    """等待有空闲下载槽位"""
-                    wait_start = asyncio.get_event_loop().time()
-                    last_log_time = 0
-                    check_interval = 2.0  # 每2秒检查一次
-                    
-                    while True:
-                        try:
-                            # 获取当前正在下载和等待的任务数
-                            active_tasks = await aria2_client.tell_active()
-                            waiting_tasks = await aria2_client.tell_waiting(0, 100)
-                            current_count = len(active_tasks) + len(waiting_tasks)
-                            elapsed_time = asyncio.get_event_loop().time() - wait_start
-                            
-                            # 如果有空闲位置（至少留一个位置），返回
-                            if current_count < max_concurrent - 1:
-                                if elapsed_time > 1:  # 如果等待了超过1秒，记录日志
-                                    logger.debug(f"等待空闲槽位成功，当前任务数: {current_count}，等待时间: {elapsed_time:.1f}秒")
-                                return True
-                            
-                            # 定期记录等待状态（每5秒记录一次）
-                            if elapsed_time - last_log_time >= 5:
-                                logger.debug(
-                                    f"等待空闲槽位中... 当前任务数: {current_count}/{max_concurrent}，"
-                                    f"已等待: {elapsed_time:.1f}秒"
-                                )
-                                last_log_time = elapsed_time
-                            
-                            # 检查是否超时
-                            if elapsed_time > max_wait_time:
-                                logger.warning(
-                                    f"等待空闲槽位超时（{max_wait_time}秒），当前任务数: {current_count}/{max_concurrent}，"
-                                    f"将继续尝试添加任务（任务将进入等待队列）"
-                                )
-                                # 即使超时也返回True，让任务添加到等待队列
-                                return True
-                            
-                            # 等待后重试（使用动态间隔）
-                            await asyncio.sleep(check_interval)
-                        except Exception as e:
-                            logger.error(f"检查aria2任务状态失败: {e}")
-                            # 如果检查失败，等待一下再继续
-                            await asyncio.sleep(1.0)
-                            # 如果检查失败，假设有空闲位置，继续尝试
-                            return True
+                # 使用统一的等待槽位函数（确保不超过最大并发数）
+                from .utils import wait_for_download_slot
                 
                 async def wait_for_task_start(gid, timeout=5):
                     """等待任务真正开始（状态变为active或waiting）"""
@@ -270,6 +213,12 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 min_file_size_mb = get_config_value('MIN_FILE_SIZE_MB', 100)
                 min_size_bytes = min_file_size_mb * 1024 * 1024 if skip_small_files else 0
                 
+                # 如果启用小文件跳过，允许并发下载；否则串行下载
+                if skip_small_files:
+                    logger.info(f"[媒体组下载] 已启用小文件跳过，将并发添加 {len(download_links)} 个下载任务")
+                else:
+                    logger.info(f"[媒体组下载] 未启用小文件跳过，将串行添加 {len(download_links)} 个下载任务（避免并发过高）")
+                
                 for i, link in enumerate(download_links):
                     retry_count = 0
                     max_retries = 3
@@ -295,9 +244,23 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                     
                     while retry_count <= max_retries and not added_successfully:
                         try:
-                            # 等待有空闲槽位（除了第一个任务和重试时）
+                            # 无论是否启用小文件跳过，都必须等待空闲槽位，确保不超过最大并发数
+                            # 只有在添加第一个任务且不是重试时，才可能跳过等待（但为了安全，仍然检查）
                             if i > 0 or retry_count > 0:
-                                await wait_for_slot()
+                                await wait_for_download_slot(max_wait_time=60)
+                            else:
+                                # 即使是第一个任务，也检查一下当前任务数，确保不超过限制
+                                try:
+                                    active_tasks = await aria2_client.tell_active()
+                                    waiting_tasks = await aria2_client.tell_waiting(0, 100)
+                                    current_count = len(active_tasks) + len(waiting_tasks)
+                                    from .utils import get_aria2_max_concurrent_downloads
+                                    max_concurrent = await get_aria2_max_concurrent_downloads()
+                                    if current_count >= max_concurrent:
+                                        logger.debug(f"当前任务数已达上限 ({current_count}/{max_concurrent})，等待空闲槽位")
+                                        await wait_for_download_slot(max_wait_time=60)
+                                except Exception as e:
+                                    logger.debug(f"检查任务数失败，继续添加: {e}")
                             
                             # 添加任务
                             result = await aria2_client.add_uri(uris=[link])
@@ -317,8 +280,10 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                                 except Exception as db_e:
                                     logger.error(f"记录下载任务到数据库失败: {db_e}", exc_info=True)
                                 
-                                # 等待任务真正开始
-                                if await wait_for_task_start(gid):
+                                # 如果启用小文件跳过，允许并发下载（不等待任务开始）
+                                # 如果未启用小文件跳过，等待任务开始以确保稳定性
+                                if skip_small_files:
+                                    # 并发模式：不等待任务开始，直接标记为成功并继续
                                     try:
                                         mark_download_started(gid)
                                     except Exception as db_e:
@@ -326,17 +291,42 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                                     success_count += 1
                                     added_successfully = True
                                     task_gids.append(gid)  # 记录任务GID
+                                    # 注册GID和队列通知消息的关联（用于清理完成后更新通知）
+                                    if queue_reply_msg:
+                                        try:
+                                            from .utils import register_gid_queue_msg
+                                            register_gid_queue_msg(gid, queue_reply_msg)
+                                        except Exception as reg_e:
+                                            logger.debug(f"注册GID队列消息失败: {reg_e}")
                                     logger.debug(f"成功添加任务 {i+1}/{len(download_links)}: {link[:50]}...")
                                 else:
-                                    # 任务被中止或失败，重试
-                                    if retry_count < max_retries:
-                                        retry_count += 1
-                                        logger.warning(f"任务被中止，重试 {retry_count}/{max_retries}: {link[:50]}...")
-                                        await asyncio.sleep(2)  # 重试前等待2秒
+                                    # 串行模式：等待任务真正开始
+                                    if await wait_for_task_start(gid):
+                                        try:
+                                            mark_download_started(gid)
+                                        except Exception as db_e:
+                                            logger.error(f"更新任务开始状态失败: {db_e}", exc_info=True)
+                                        success_count += 1
+                                        added_successfully = True
+                                        task_gids.append(gid)  # 记录任务GID
+                                        # 注册GID和队列通知消息的关联（用于清理完成后更新通知）
+                                        if queue_reply_msg:
+                                            try:
+                                                from .utils import register_gid_queue_msg
+                                                register_gid_queue_msg(gid, queue_reply_msg)
+                                            except Exception as reg_e:
+                                                logger.debug(f"注册GID队列消息失败: {reg_e}")
+                                        logger.debug(f"成功添加任务 {i+1}/{len(download_links)}: {link[:50]}...")
                                     else:
-                                        failed_count += 1
-                                        logger.error(f"任务添加失败，已达到最大重试次数: {link[:50]}...")
-                                        break  # 达到最大重试次数，跳出重试循环
+                                        # 任务被中止或失败，重试
+                                        if retry_count < max_retries:
+                                            retry_count += 1
+                                            logger.warning(f"任务被中止，重试 {retry_count}/{max_retries}: {link[:50]}...")
+                                            await asyncio.sleep(2)  # 重试前等待2秒
+                                        else:
+                                            failed_count += 1
+                                            logger.error(f"任务添加失败，已达到最大重试次数: {link[:50]}...")
+                                            break  # 达到最大重试次数，跳出重试循环
                             else:
                                 # 添加失败
                                 error_msg = result.get('error', {}).get('message', '未知错误') if result else '无返回结果'
@@ -349,8 +339,9 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                                     logger.error(f"添加任务失败 (第{i+1}个): {error_msg}")
                                     break  # 达到最大重试次数，跳出重试循环
                             
-                            # 添加延迟，避免请求过快
-                            if added_successfully and i < len(download_links) - 1:
+                            # 如果未启用小文件跳过，添加延迟避免请求过快
+                            # 如果启用小文件跳过，允许并发下载，不需要延迟
+                            if not skip_small_files and added_successfully and i < len(download_links) - 1:
                                 await asyncio.sleep(1.0)  # 成功添加后延迟1秒，确保任务稳定
                                 
                         except Exception as e:
@@ -400,8 +391,29 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                     parse_mode=ParseMode.HTML,
                 )
         else:
-            # 如果不发送直链信息，只记录日志
+            # 如果不发送直链信息，更新队列通知消息为处理中状态
+            if queue_reply_msg:
+                try:
+                    processing_text = (
+                        "✅ <b>已收到您的消息</b>\n\n"
+                        "📥 消息正在处理中...\n"
+                        f"📊 共 {len(stream_links)} 个文件\n"
+                        f"⬇️ {len(download_links)} 个将下载\n"
+                        "🔄 请稍候，处理完成后会通知您"
+                    )
+                    await queue_reply_msg.edit_text(
+                        text=processing_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.debug(f"更新队列通知消息失败: {e}")
+            
+            # 记录日志
             logger.info(f"已处理媒体组（不发送直链信息）：共 {len(stream_links)} 个文件，{len(download_links)} 个已添加到下载队列")
+        
+        # 如果没有创建下载任务，且没有发送直链信息，保留队列通知消息以便后续更新
+        # 如果创建了下载任务，队列通知消息会在清理完成时更新为完成状态
+        # 如果没有创建下载任务且发送了直链信息，队列通知消息已被删除，不需要处理
         
         # 返回任务GID列表，供队列处理器等待完成
         return task_gids
@@ -432,8 +444,9 @@ async def process_single_media(m: Message, queue_reply_msg=None):
     if not Var.ENABLE_STREAM:
         return
     
-    # 如果有排队通知，先删除它（因为我们要发送实际的处理结果）
-    if queue_reply_msg:
+    # 如果有排队通知，且启用了发送直链信息，则删除它（因为我们要发送实际的处理结果）
+    # 如果没有启用发送直链信息，保留队列通知消息，以便后续更新为完成状态
+    if queue_reply_msg and Var.SEND_STREAM_LINK:
         try:
             await queue_reply_msg.delete()
         except Exception as e:
@@ -488,6 +501,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     min_file_size_mb = get_config_value('MIN_FILE_SIZE_MB', 100)
                     
                     # 如果启用了跳过小文件功能，且文件大小已知且小于限制，则跳过
+                    skip_this_file = False
                     if skip_small_files and file_size and file_size > 0:
                         min_size_bytes = min_file_size_mb * 1024 * 1024
                         if file_size < min_size_bytes:
@@ -497,21 +511,35 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                             # 不添加到下载队列，但继续执行后续逻辑（返回直链等）（静默处理，不发送通知）
                             download_added = False
                             task_gid = None
+                            skip_this_file = True
                     
-                    # 将直链URL添加到aria2下载队列
-                    result = await aria2_client.add_uri(uris=[stream_link])
-                    if result and 'result' in result:
-                        task_gid = result.get('result')
-                        # 记录 Telegram 媒体与下载任务到数据库
-                        try:
-                            if media:
-                                file_unique_id = save_tg_media(m, media)
-                                create_download(file_unique_id, task_gid, stream_link)
-                                mark_download_started(task_gid)
-                        except Exception as db_e:
-                            logger.error(f"记录单文件下载任务到数据库失败: {db_e}", exc_info=True)
-                    download_added = True
-                    logger.info(f"已将直链添加到aria2下载队列: {stream_link}, GID: {task_gid}")
+                    # 将直链URL添加到aria2下载队列（如果文件未被跳过）
+                    if not skip_this_file:
+                        # 等待有空闲下载槽位，确保不超过最大并发数
+                        from .utils import wait_for_download_slot
+                        await wait_for_download_slot(max_wait_time=60)
+                        
+                        result = await aria2_client.add_uri(uris=[stream_link])
+                        if result and 'result' in result:
+                            task_gid = result.get('result')
+                            # 记录 Telegram 媒体与下载任务到数据库
+                            try:
+                                if media:
+                                    file_unique_id = save_tg_media(m, media)
+                                    create_download(file_unique_id, task_gid, stream_link)
+                                    mark_download_started(task_gid)
+                            except Exception as db_e:
+                                logger.error(f"记录单文件下载任务到数据库失败: {db_e}", exc_info=True)
+                            
+                            # 注册GID和队列通知消息的关联（用于清理完成后更新通知）
+                            try:
+                                from .utils import register_gid_queue_msg
+                                register_gid_queue_msg(task_gid, queue_reply_msg, original_msg=m)
+                            except Exception as reg_e:
+                                logger.debug(f"注册GID队列消息失败: {reg_e}")
+                            
+                        download_added = True
+                        logger.info(f"已将直链添加到aria2下载队列: {stream_link}, GID: {task_gid}")
                 except Exception as e:
                     logger.error(f"添加直链到aria2失败: {e}", exc_info=True)
         
@@ -559,11 +587,30 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     parse_mode=ParseMode.HTML,
                 )
         else:
-            # 如果不发送直链信息，只记录日志
+            # 如果不发送直链信息，更新队列通知消息为处理中状态
+            if queue_reply_msg:
+                try:
+                    processing_text = (
+                        "✅ <b>已收到您的消息</b>\n\n"
+                        "📥 消息正在处理中...\n"
+                        "🔄 请稍候，处理完成后会通知您"
+                    )
+                    await queue_reply_msg.edit_text(
+                        text=processing_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.debug(f"更新队列通知消息失败: {e}")
+            
+            # 记录日志
             if download_added:
                 logger.info(f"已处理文件（不发送直链信息）：{get_name(m)}，已添加到下载队列")
             else:
                 logger.info(f"已处理文件（不发送直链信息）：{get_name(m)}，仅转发")
+        
+        # 如果没有创建下载任务，且没有发送直链信息，保留队列通知消息以便后续更新
+        # 如果创建了下载任务，队列通知消息会在清理完成时更新为完成状态
+        # 如果没有创建下载任务且发送了直链信息，队列通知消息已被删除，不需要处理
         
         # 返回任务GID列表，供队列处理器等待完成
         return [task_gid] if task_gid else []

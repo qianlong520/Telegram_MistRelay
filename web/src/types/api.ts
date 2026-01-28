@@ -7,6 +7,25 @@ export interface ServerStatus {
   version: string
 }
 
+export interface UploadRecord {
+  id: number
+  upload_target: string
+  status: 'pending' | 'waiting_download' | 'uploading' | 'completed' | 'failed' | 'cancelled' | 'paused'
+  total_size?: number
+  uploaded_size?: number
+  upload_speed?: number
+  failure_reason?: string
+  error_message?: string
+  created_at?: string
+  started_at?: string
+  completed_at?: string
+  cleaned_at?: string
+  updated_at?: string
+  file_name?: string
+  remote_path?: string
+  download_id?: number
+}
+
 export interface DownloadRecord {
   id: number
   gid?: string
@@ -19,6 +38,7 @@ export interface DownloadRecord {
   local_path?: string
   remote_path?: string
   upload_status?: string
+  updated_at?: string
   created_at: string
   started_at?: string
   completed_at?: string
@@ -30,6 +50,7 @@ export interface DownloadRecord {
   media_group_id?: string
   caption?: string
   message_date?: string
+  uploads?: UploadRecord[]
 }
 
 export interface DownloadGroup {

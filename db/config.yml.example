@@ -11,12 +11,20 @@ FORWARD_ID: 转发id
 UP_TELEGRAM: false
 #是否启用rclone上传到OneDrive
 UP_ONEDRIVE: true
+#是否启用rclone上传到Google Drive
+UP_GOOGLE_DRIVE: false
 
 #rclone配置
 RCLONE_REMOTE: onedrive #rclone配置的远程名称
 RCLONE_PATH: /Downloads #OneDrive上的目标路径
 #是否在成功上传到OneDrive后自动删除本地文件
 AUTO_DELETE_AFTER_UPLOAD: true
+
+#Google Drive配置
+# 注意：Google Drive上传使用rclone，需要在rclone.conf中配置OAuth2 token
+# 请使用 rclone config 命令配置Google Drive，参考: https://rclone.org/drive/
+GOOGLE_DRIVE_REMOTE: gdrive #rclone配置的Google Drive远程名称（需与rclone.conf中的配置名称一致）
+GOOGLE_DRIVE_PATH: /Downloads #Google Drive上的目标路径
 #下载保存路径
 SAVE_PATH: /root/mistrelay_downloads
 
@@ -61,6 +69,12 @@ SEND_STREAM_LINK: false
 SKIP_SMALL_FILES: false
 # 最小文件大小(MB),小于此大小的文件将被跳过(默认100MB)
 MIN_FILE_SIZE_MB: 100
+# 消息队列最大并发处理数量(默认5,限制同时处理的消息数量)
+MAX_CONCURRENT_MESSAGES: 5
+
+# aria2最大并发下载数(默认5,限制同时下载的任务数量)
+# 注意:此配置会覆盖aria2.conf中的max-concurrent-downloads设置
+ARIA2_MAX_CONCURRENT_DOWNLOADS: 5
 # 多机器人负载均衡配置(可选)
 # 配置额外的BOT_TOKEN以实现负载均衡,提高并发处理能力
 # 注意:这些是额外的token,默认的BOT_TOKEN(上面的BOT_TOKEN)会作为第一个客户端(索引0)

@@ -162,7 +162,7 @@ async def handler(event):
 @bot.on(events.NewMessage(from_users=ADMIN_ID))
 async def send_welcome(event):
     text = event.raw_text
-    log.info(str(datetime.datetime.now()) + ':' + text)
+    log.info(str(datetime.datetime.utcnow()) + ':' + text)
     
     # 任务查看菜单
     if text == '⬇️正在下载':

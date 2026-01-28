@@ -69,8 +69,8 @@ async def send_flood_wait_notification(wait_seconds: int):
     backup_bot = multi_clients[best_bot_idx]
     try:
         import datetime
-        end_time = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
-        end_time_str = end_time.strftime('%H:%M:%S')
+        end_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=wait_seconds)
+        end_time_str = end_time.strftime('%H:%M:%S UTC')
         notification_text = (
             f"⚠️ **Telegram 限流通知**\\n\\n"
             f"🚫 主 bot 已被 Telegram 限流\\n"

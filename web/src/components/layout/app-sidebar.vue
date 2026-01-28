@@ -28,7 +28,7 @@
       
       <el-menu-item index="/downloads" class="menu-item">
         <el-icon><Download /></el-icon>
-        <template #title>下载管理</template>
+        <template #title>任务中心</template>
       </el-menu-item>
       
       <el-menu-item index="/tasks" class="menu-item">

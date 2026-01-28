@@ -64,7 +64,24 @@ if _db_dir and not os.path.exists(_db_dir):
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    """返回UTC时间的ISO8601格式字符串，带'Z'后缀表示UTC时区"""
+    return datetime.utcnow().isoformat(timespec="seconds") + 'Z'
+
+
+def _format_message_date(msg_date) -> str:
+    """格式化消息日期为ISO8601格式，确保带时区信息"""
+    if not msg_date:
+        return _now_iso()
+    # Pyrogram的message.date是UTC时间的datetime对象
+    # 转换为ISO格式并添加'Z'后缀表示UTC
+    iso_str = msg_date.isoformat()
+    # 如果已经有时区信息（带+或-），保持不变；否则添加'Z'
+    if 'Z' in iso_str or '+' in iso_str or (len(iso_str) > 10 and iso_str[-6] in '+-'):
+        return iso_str
+    # 移除微秒部分（如果有），只保留秒级精度
+    if '.' in iso_str:
+        iso_str = iso_str.split('.')[0]
+    return iso_str + 'Z'
 
 
 def get_connection():
@@ -193,6 +210,15 @@ def init_db():
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_uploads_failure_reason ON uploads (failure_reason)"
         )
+        
+        # 数据库迁移：为 uploads 表添加 cleaned_at 字段（如果不存在）
+        try:
+            cur.execute("ALTER TABLE uploads ADD COLUMN cleaned_at TEXT")
+            logging.info("已为 uploads 表添加 cleaned_at 字段")
+        except sqlite3.OperationalError as e:
+            # 字段已存在，忽略错误
+            if "duplicate column name" not in str(e).lower():
+                logging.warning(f"添加 cleaned_at 字段时出错（可能已存在）: {e}")
 
         # 系统配置表
         cur.execute(
@@ -278,7 +304,7 @@ def save_tg_media(message, media) -> str:
                 getattr(media, "height", None),
                 message.caption,
                 ce_json,
-                message.date.isoformat() if getattr(message, "date", None) else _now_iso(),
+                _format_message_date(message.date) if getattr(message, "date", None) else _now_iso(),
                 message.media_group_id,
                 int(bool(getattr(message, "has_media_spoiler", False))),
                 int(bool(getattr(media, "supports_streaming", False))),
@@ -302,7 +328,13 @@ def create_download(file_unique_id: str, gid: str | None, source_url: str | None
             """,
             (file_unique_id, gid, source_url, now, now),
         )
-        return cur.lastrowid
+        download_id = cur.lastrowid
+    # 如果有 gid，推送 WebSocket 更新（新记录通知）
+    if gid:
+        _notify_ws_download_update(gid)
+    # 推送统计更新，确保前端刷新列表
+    _notify_ws_statistics_update()
+    return download_id
 
 
 def mark_download_started(gid: str):
@@ -319,6 +351,8 @@ def mark_download_started(gid: str):
             """,
             (now, now, gid),
         )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
 
 
 def get_download_id_by_gid(gid: str) -> int | None:
@@ -330,23 +364,184 @@ def get_download_id_by_gid(gid: str) -> int | None:
         return row['id'] if row else None
 
 
-def mark_download_completed(gid: str, local_path: str | None, total_length: int | None):
-    """标记下载完成状态和本地路径。"""
-    now = _now_iso()
-    with db_cursor() as cur:
+def get_download_by_id(download_id: int):
+    """根据 ID 获取下载记录。"""
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
         cur.execute(
             """
-            UPDATE downloads
-               SET status = 'completed',
-                   local_path = COALESCE(?, local_path),
-                   total_length = COALESCE(?, total_length),
-                   completed_length = COALESCE(?, completed_length),
-                   completed_at = ?,
-                   updated_at = ?
-             WHERE gid = ?
+            SELECT * FROM downloads
+            WHERE id = ?
             """,
-            (local_path, total_length, total_length, now, now, gid),
+            (download_id,),
         )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def _notify_ws_download_update(gid: str):
+    """通过 WebSocket 推送下载状态更新（异步，不阻塞）"""
+    try:
+        from WebStreamer.server.ws_manager import ws_manager
+        import asyncio
+        
+        # 获取下载记录
+        download_id = get_download_id_by_gid(gid)
+        if download_id:
+            download = get_download_by_id(download_id)
+            if download:
+                # 异步推送更新
+                loop = None
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # 如果没有事件循环，创建一个新的
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                if loop and not loop.is_closed():
+                    asyncio.create_task(ws_manager.send_download_update({
+                        "gid": gid,
+                        "download_id": download_id,
+                        "status": download.get('status'),
+                        "completed_length": download.get('completed_length'),
+                        "total_length": download.get('total_length'),
+                        "download_speed": download.get('download_speed'),
+                    }))
+    except Exception as e:
+        # 静默失败，不影响主流程
+        pass
+
+
+def _notify_ws_upload_update(upload_id: int):
+    """通过 WebSocket 推送上传状态更新（异步，不阻塞）"""
+    try:
+        from WebStreamer.server.ws_manager import ws_manager
+        import asyncio
+        
+        upload = get_upload_by_id(upload_id)
+        if upload:
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop and not loop.is_closed():
+                asyncio.create_task(ws_manager.send_upload_update({
+                    "upload_id": upload_id,
+                    "download_id": upload.get('download_id'),
+                    "status": upload.get('status'),
+                    "uploaded_size": upload.get('uploaded_size'),
+                    "total_size": upload.get('total_size'),
+                    "upload_speed": upload.get('upload_speed'),
+                    "cleaned_at": upload.get('cleaned_at'),  # 包含清理状态
+                }))
+    except Exception as e:
+        pass
+
+
+def _notify_ws_cleanup_update(upload_id: int):
+    """通过 WebSocket 推送清理状态更新（异步，不阻塞）"""
+    try:
+        from WebStreamer.server.ws_manager import ws_manager
+        import asyncio
+        
+        upload = get_upload_by_id(upload_id)
+        if upload:
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop and not loop.is_closed():
+                asyncio.create_task(ws_manager.send_cleanup_update({
+                    "upload_id": upload_id,
+                    "download_id": upload.get('download_id'),
+                    "cleaned_at": upload.get('cleaned_at'),
+                }))
+    except Exception as e:
+        pass
+
+
+def _notify_ws_statistics_update():
+    """通过 WebSocket 推送统计信息更新（异步，不阻塞）"""
+    try:
+        from WebStreamer.server.ws_manager import ws_manager
+        import asyncio
+        
+        # 获取统计信息
+        download_stats = get_download_statistics()
+        upload_stats = get_upload_statistics()
+        
+        loop = None
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        if loop and not loop.is_closed():
+            asyncio.create_task(ws_manager.send_statistics_update({
+                "downloads": download_stats,
+                "uploads": upload_stats,
+            }))
+    except Exception as e:
+        # 静默失败，不影响主流程
+        pass
+
+
+def mark_download_completed(gid: str, local_path: str | None, total_length: int | None):
+    """
+    标记下载完成状态和本地路径。
+    注意：这里不立即标记为 completed，而是保持当前状态（downloading）。
+    只有在清理完成后，才会通过 mark_upload_cleaned 更新为 completed。
+    """
+    now = _now_iso()
+    with db_cursor() as cur:
+        # 检查是否有上传任务，如果有，保持 downloading 状态；如果没有，标记为 completed
+        download_id = get_download_id_by_gid(gid)
+        has_uploads = False
+        if download_id:
+            cur.execute("SELECT COUNT(*) FROM uploads WHERE download_id = ?", (download_id,))
+            upload_count = cur.fetchone()[0]
+            has_uploads = upload_count > 0
+        
+        # 如果有上传任务，保持 downloading 状态；否则标记为 completed
+        if has_uploads:
+            # 保持当前状态（通常是 downloading），只更新路径和大小
+            cur.execute(
+                """
+                UPDATE downloads
+                   SET local_path = COALESCE(?, local_path),
+                       total_length = COALESCE(?, total_length),
+                       completed_length = COALESCE(?, completed_length),
+                       updated_at = ?
+                 WHERE gid = ?
+                """,
+                (local_path, total_length, total_length, now, gid),
+            )
+        else:
+            # 没有上传任务，直接标记为 completed
+            cur.execute(
+                """
+                UPDATE downloads
+                   SET status = 'completed',
+                       local_path = COALESCE(?, local_path),
+                       total_length = COALESCE(?, total_length),
+                       completed_length = COALESCE(?, completed_length),
+                       completed_at = ?,
+                       updated_at = ?
+                 WHERE gid = ?
+                """,
+                (local_path, total_length, total_length, now, now, gid),
+            )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
 
 
 def mark_download_failed(gid: str, error_message: str | None):
@@ -363,11 +558,48 @@ def mark_download_failed(gid: str, error_message: str | None):
             """,
             (error_message, now, gid),
         )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
+
+
+def update_download_progress(gid: str, completed_length: int | None = None, 
+                             total_length: int | None = None, 
+                             download_speed: int | None = None):
+    """更新下载进度。"""
+    now = _now_iso()
+    updates = ["updated_at = ?"]
+    values = [now]
+    
+    if completed_length is not None:
+        updates.append("completed_length = ?")
+        values.append(completed_length)
+    
+    if total_length is not None:
+        updates.append("total_length = ?")
+        values.append(total_length)
+    
+    if download_speed is not None:
+        updates.append("download_speed = ?")
+        values.append(download_speed)
+    
+    values.append(gid)
+    
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE downloads
+               SET {', '.join(updates)}
+             WHERE gid = ?
+            """,
+            tuple(values),
+        )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
 
 
 def fetch_recent_downloads(limit: int = 100):
     """
-    查询最近的下载记录（按创建时间倒序），包含部分 Telegram 媒体字段，
+    查询最近的下载记录（按创建时间倒序），包含部分 Telegram 媒体字段和上传信息，
     用于 Web 管理页面展示。
     """
     with get_connection() as conn:
@@ -382,12 +614,14 @@ def fetch_recent_downloads(limit: int = 100):
                 d.status,
                 d.total_length,
                 d.completed_length,
+                d.download_speed,
                 d.local_path,
                 d.remote_path,
                 d.upload_status,
                 d.created_at,
                 d.started_at,
                 d.completed_at,
+                d.updated_at,
                 m.file_name,
                 m.mime_type,
                 m.file_size,
@@ -395,17 +629,97 @@ def fetch_recent_downloads(limit: int = 100):
                 m.message_id,
                 m.media_group_id,
                 m.caption,
-                m.message_date
+                m.message_date,
+                u.id as upload_id,
+                u.upload_target,
+                u.remote_path as upload_remote_path,
+                u.status as upload_status_detail,
+                u.total_size as upload_total_size,
+                u.uploaded_size,
+                u.upload_speed,
+                u.failure_reason,
+                u.error_message as upload_error_message,
+                u.created_at as upload_created_at,
+                u.started_at as upload_started_at,
+                u.completed_at as upload_completed_at,
+                u.cleaned_at as upload_cleaned_at
             FROM downloads AS d
             LEFT JOIN tg_media AS m
               ON d.file_unique_id = m.file_unique_id
-            ORDER BY d.created_at DESC
+            LEFT JOIN uploads AS u
+              ON u.download_id = d.id
+            ORDER BY d.created_at DESC, u.created_at DESC
             LIMIT ?
             """,
             (limit,),
         )
         rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        # 将结果转换为字典，并处理多个上传记录的情况
+        result_dict = {}
+        for row in rows:
+            download_id = row['id']
+            if download_id not in result_dict:
+                # 创建下载记录
+                download_record = {
+                    'id': row['id'],
+                    'gid': row['gid'],
+                    'source_url': row['source_url'],
+                    'status': row['status'],
+                    'total_length': row['total_length'],
+                    'completed_length': row['completed_length'],
+                    'download_speed': row['download_speed'],
+                    'local_path': row['local_path'],
+                    'remote_path': row['remote_path'],
+                    'upload_status': row['upload_status'],
+                    'created_at': row['created_at'],
+                    'started_at': row['started_at'],
+                    'completed_at': row['completed_at'],
+                    'updated_at': row['updated_at'],
+                    'file_name': row['file_name'],
+                    'mime_type': row['mime_type'],
+                    'file_size': row['file_size'],
+                    'chat_id': row['chat_id'],
+                    'message_id': row['message_id'],
+                    'media_group_id': row['media_group_id'],
+                    'caption': row['caption'],
+                    'message_date': row['message_date'],
+                    'uploads': []
+                }
+                result_dict[download_id] = download_record
+            
+            # 添加上传记录（如果有）
+            if row['upload_id']:
+                upload_id = row['upload_id']
+                # 检查是否已经添加过这个上传记录
+                existing_upload_ids = [u['id'] for u in result_dict[download_id]['uploads']]
+                if upload_id not in existing_upload_ids:
+                    upload_record = {
+                        'id': upload_id,
+                        'upload_target': row['upload_target'],
+                        'remote_path': row['upload_remote_path'],
+                        'status': row['upload_status_detail'],
+                        'total_size': row['upload_total_size'],
+                        'uploaded_size': row['uploaded_size'],
+                        'upload_speed': row['upload_speed'],
+                        'failure_reason': row['failure_reason'],
+                        'error_message': row['upload_error_message'],
+                        'created_at': row['upload_created_at'],
+                        'started_at': row['upload_started_at'],
+                        'completed_at': row['upload_completed_at'],
+                        'cleaned_at': row['upload_cleaned_at']
+                    }
+                    result_dict[download_id]['uploads'].append(upload_record)
+        
+        # 对每个下载记录的上传列表按创建时间倒序排序（保持稳定排序）
+        # 使用ID作为次要排序键，确保排序稳定
+        for download_record in result_dict.values():
+            if download_record.get('uploads'):
+                download_record['uploads'].sort(key=lambda u: (
+                    u.get('created_at') or '',  # 字符串排序（ISO格式天然支持）
+                    u.get('id') or 0
+                ), reverse=False)  # 正序：先创建的在前，后创建的在后
+        
+        return list(result_dict.values())
 
 
 def fetch_downloads_grouped(limit: int = 100):
@@ -440,7 +754,30 @@ def fetch_downloads_grouped(limit: int = 100):
         
         # 计算组统计信息
         total_files = len(downloads)
-        completed = sum(1 for d in downloads if d.get('status') == 'completed')
+        
+        # 计算已完成数量：下载完成且所有上传任务都已完成（或没有上传任务）
+        def is_truly_completed(download_record):
+            """判断一个下载记录是否真正完成（下载完成且所有上传都完成）"""
+            if download_record.get('status') != 'completed':
+                return False
+            
+            # 检查上传任务
+            uploads = download_record.get('uploads', [])
+            if not uploads:
+                # 没有上传任务，下载完成即完成
+                return True
+            
+            # 检查所有上传任务是否都已完成或失败
+            for upload in uploads:
+                upload_status = upload.get('status')
+                # 如果有正在上传、等待下载或待处理的上传任务，不算完成
+                if upload_status in ['uploading', 'pending', 'waiting_download']:
+                    return False
+            
+            # 所有上传任务都已完成或失败
+            return True
+        
+        completed = sum(1 for d in downloads if is_truly_completed(d))
         downloading = sum(1 for d in downloads if d.get('status') == 'downloading')
         failed = sum(1 for d in downloads if d.get('status') == 'failed')
         pending = sum(1 for d in downloads if d.get('status') == 'pending')
@@ -449,6 +786,14 @@ def fetch_downloads_grouped(limit: int = 100):
         
         total_size = sum(d.get('total_length') or d.get('file_size') or 0 for d in downloads)
         completed_size = sum(d.get('completed_length') or 0 for d in downloads)
+        
+        # 对组内的下载记录按创建时间正序排序（保持稳定排序）
+        # 使用ID作为次要排序键，确保排序稳定
+        # 正序：先创建的在前，后创建的在后
+        downloads_sorted = sorted(downloads, key=lambda d: (
+            d.get('created_at') or '',  # 字符串排序（ISO格式天然支持）
+            d.get('id') or 0
+        ), reverse=False)
         
         result.append({
             'group_key': group_key,
@@ -469,10 +814,10 @@ def fetch_downloads_grouped(limit: int = 100):
                 'total_size': total_size,
                 'completed_size': completed_size
             },
-            'downloads': downloads
+            'downloads': downloads_sorted
         })
     
-    # 按创建时间倒序排序
+    # 按创建时间倒序排序（后创建的在前，先创建的在后）
     result.sort(key=lambda x: x['created_at'], reverse=True)
     
     return result
@@ -587,6 +932,10 @@ def init_config_from_yaml():
             'RCLONE_REMOTE': ('string', 'rclone', 'rclone远程名称'),
             'RCLONE_PATH': ('string', 'rclone', 'OneDrive目标路径'),
             'AUTO_DELETE_AFTER_UPLOAD': ('bool', 'rclone', '上传后自动删除本地文件'),
+            # 谷歌网盘配置
+            'UP_GOOGLE_DRIVE': ('bool', 'rclone', '是否上传到Google Drive'),
+            'GOOGLE_DRIVE_REMOTE': ('string', 'rclone', 'Google Drive Rclone远程名称（默认gdrive），需与rclone.conf中的配置名称一致'),
+            'GOOGLE_DRIVE_PATH': ('string', 'rclone', 'Google Drive上传路径（默认/Downloads）'),
             
             # 下载配置
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
@@ -598,6 +947,7 @@ def init_config_from_yaml():
             # Aria2配置
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
             'RPC_URL': ('string', 'aria2', 'Aria2 RPC URL'),
+            'MAX_CONCURRENT_UPLOADS': ('int', 'upload', '最大并发上传数（默认10）'),
             
             # 直链功能配置
             'ENABLE_STREAM': ('bool', 'stream', '是否启用直链功能'),
@@ -660,7 +1010,12 @@ def create_upload(download_id: int, upload_target: str, remote_path: str = None,
             """,
             (download_id, upload_target, remote_path, max_retries, now, now),
         )
-        return cur.lastrowid
+        upload_id = cur.lastrowid
+    # 推送 WebSocket 更新（新记录通知）
+    _notify_ws_upload_update(upload_id)
+    # 推送统计更新，确保前端刷新列表
+    _notify_ws_statistics_update()
+    return upload_id
 
 
 def update_upload_status(upload_id: int, status: str, **kwargs):
@@ -695,22 +1050,46 @@ def update_upload_status(upload_id: int, status: str, **kwargs):
             """,
             tuple(values),
         )
+    # 推送 WebSocket 更新（仅在状态变化或关键字段更新时）
+    if status == 'uploading' or 'uploaded_size' in kwargs or 'upload_speed' in kwargs:
+        _notify_ws_upload_update(upload_id)
 
 
-def mark_upload_started(upload_id: int):
-    """标记上传开始时间。"""
+def mark_upload_started(upload_id: int, total_size: int = None):
+    """
+    标记上传开始时间。
+    
+    Args:
+        upload_id: 上传记录 ID
+        total_size: 可选，文件总大小（字节）
+    """
     now = _now_iso()
     with db_cursor() as cur:
-        cur.execute(
-            """
-            UPDATE uploads
-               SET status = 'uploading',
-                   started_at = COALESCE(started_at, ?),
-                   updated_at = ?
-             WHERE id = ?
-            """,
-            (now, now, upload_id),
-        )
+        if total_size and total_size > 0:
+            cur.execute(
+                """
+                UPDATE uploads
+                   SET status = 'uploading',
+                       started_at = COALESCE(started_at, ?),
+                       total_size = COALESCE(total_size, ?),
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (now, total_size, now, upload_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE uploads
+                   SET status = 'uploading',
+                       started_at = COALESCE(started_at, ?),
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (now, now, upload_id),
+            )
+    # 推送 WebSocket 更新
+    _notify_ws_upload_update(upload_id)
 
 
 def mark_upload_completed(upload_id: int, remote_path: str = None):
@@ -729,6 +1108,8 @@ def mark_upload_completed(upload_id: int, remote_path: str = None):
             """,
             (remote_path, now, now, upload_id),
         )
+    # 推送 WebSocket 更新
+    _notify_ws_upload_update(upload_id)
 
 
 def mark_upload_failed(upload_id: int, failure_reason: str, error_message: str = None, error_code: str = None):
@@ -755,6 +1136,98 @@ def mark_upload_failed(upload_id: int, failure_reason: str, error_message: str =
             """,
             (failure_reason, error_message, error_code, now, upload_id),
         )
+    # 推送 WebSocket 更新
+    _notify_ws_upload_update(upload_id)
+
+
+def mark_upload_cleaned(upload_id: int):
+    """
+    标记上传任务对应的文件已被清理（删除）。
+    如果该下载任务的所有上传都已清理完成，则将下载状态更新为 completed。
+    
+    Args:
+        upload_id: 上传记录 ID
+    """
+    now = _now_iso()
+    download_id = None
+    
+    with db_cursor() as cur:
+        # 获取关联的下载ID
+        cur.execute("SELECT download_id FROM uploads WHERE id = ?", (upload_id,))
+        row = cur.fetchone()
+        if row:
+            download_id = row[0]
+        
+        # 更新清理状态
+        cur.execute(
+            """
+            UPDATE uploads
+               SET cleaned_at = ?,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (now, now, upload_id),
+        )
+        
+        # 如果有关联的下载任务，检查是否所有上传都已清理
+        if download_id:
+            # 获取该下载任务的所有上传记录
+            cur.execute(
+                """
+                SELECT id, status, cleaned_at
+                FROM uploads
+                WHERE download_id = ?
+                """,
+                (download_id,)
+            )
+            uploads = cur.fetchall()
+            
+            # 检查是否所有上传都已清理完成
+            if uploads:
+                all_cleaned = all(
+                    upload[2] is not None  # cleaned_at 不为空
+                    for upload in uploads
+                )
+                
+                # 如果所有上传都已清理，更新下载状态为 completed
+                if all_cleaned:
+                    cur.execute(
+                        """
+                        UPDATE downloads
+                           SET status = 'completed',
+                               updated_at = ?
+                         WHERE id = ? AND status != 'failed'
+                        """,
+                        (now, download_id)
+                    )
+                    # 获取 gid 以便推送 WebSocket 更新和更新队列通知消息
+                    cur.execute("SELECT gid FROM downloads WHERE id = ?", (download_id,))
+                    gid_row = cur.fetchone()
+                    if gid_row and gid_row[0]:
+                        gid = gid_row[0]
+                        _notify_ws_download_update(gid)
+                        # 更新队列通知消息（如果存在）
+                        try:
+                            from WebStreamer.bot.plugins.stream_modules.utils import update_queue_msg_on_cleanup
+                            import asyncio
+                            loop = None
+                            try:
+                                loop = asyncio.get_event_loop()
+                            except RuntimeError:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                            
+                            if loop.is_running():
+                                loop.create_task(update_queue_msg_on_cleanup(gid))
+                            else:
+                                loop.run_until_complete(update_queue_msg_on_cleanup(gid))
+                        except Exception as update_e:
+                            logging.debug(f"更新队列通知消息失败: {update_e}")
+    
+    # 推送 WebSocket 更新
+    # 同时推送清理更新和上传更新（因为清理状态是上传记录的一部分）
+    _notify_ws_cleanup_update(upload_id)
+    _notify_ws_upload_update(upload_id)  # 推送上传更新，包含清理状态
 
 
 def increment_upload_retry(upload_id: int) -> int:
@@ -904,6 +1377,142 @@ def count_uploads_by_failure_reason():
         return {row['failure_reason']: row['count'] for row in rows}
 
 
+def get_download_statistics():
+    """
+    获取下载统计信息（按消息分组统计，而不是按下载记录统计）。
+    
+    Returns:
+        包含各种统计数据的字典
+    """
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        # 获取所有下载记录，包含消息分组信息
+        cur.execute(
+            """
+            SELECT
+                d.id,
+                d.status,
+                d.total_length,
+                d.completed_length,
+                m.media_group_id,
+                m.chat_id,
+                m.message_id
+            FROM downloads AS d
+            LEFT JOIN tg_media AS m ON d.file_unique_id = m.file_unique_id
+            """
+        )
+        rows = cur.fetchall()
+        
+        # 按消息分组
+        message_groups: dict[str, list] = {}
+        
+        for row in rows:
+            row_dict = dict(row)
+            # 确定分组键：优先使用 media_group_id，否则使用 chat_id+message_id
+            if row_dict.get('media_group_id'):
+                group_key = f"group_{row_dict['media_group_id']}"
+            elif row_dict.get('chat_id') and row_dict.get('message_id'):
+                group_key = f"msg_{row_dict['chat_id']}_{row_dict['message_id']}"
+            else:
+                # 如果没有分组信息，使用下载ID作为独立消息
+                group_key = f"single_{row_dict['id']}"
+            
+            if group_key not in message_groups:
+                message_groups[group_key] = []
+            message_groups[group_key].append(row_dict)
+        
+        # 统计消息状态
+        total_messages = len(message_groups)
+        completed_messages = 0
+        downloading_messages = 0
+        failed_messages = 0
+        pending_messages = 0
+        total_size = 0
+        completed_size = 0
+        
+        for group_key, downloads in message_groups.items():
+            # 获取该消息下所有文件的状态
+            statuses = [d.get('status') for d in downloads]
+            
+            # 计算消息状态（优先级：downloading > failed > pending > completed）
+            # 如果消息下有任何一个文件正在下载，则消息状态为 downloading
+            # 如果消息下有任何一个文件失败，则消息状态为 failed
+            # 如果消息下有任何一个文件等待中，则消息状态为 pending
+            # 否则，如果所有文件都已完成，则消息状态为 completed
+            if any(s == 'downloading' for s in statuses):
+                downloading_messages += 1
+            elif any(s == 'failed' for s in statuses):
+                failed_messages += 1
+            elif any(s == 'pending' for s in statuses):
+                pending_messages += 1
+            elif all(s == 'completed' for s in statuses):
+                completed_messages += 1
+            
+            # 累计文件大小
+            for d in downloads:
+                total_size += d.get('total_length') or 0
+                completed_size += d.get('completed_length') or 0
+        
+        stats = {
+            'total': total_messages,
+            'completed': completed_messages,
+            'downloading': downloading_messages,
+            'failed': failed_messages,
+            'pending': pending_messages,
+            'waiting': pending_messages,  # waiting 和 pending 相同
+            'total_size': total_size or 0,
+            'completed_size': completed_size or 0
+        }
+        
+        return stats
+
+
+def delete_all_downloads():
+    """
+    删除所有下载记录、上传记录和关联的 Telegram 媒体记录。
+    
+    注意：
+    - 外键约束在 downloads 表上（downloads.file_unique_id 引用 tg_media.file_unique_id），
+      所以删除 downloads 不会自动删除 tg_media。我们需要手动删除所有 tg_media 记录。
+    - uploads 表有外键约束（uploads.download_id 引用 downloads.id ON DELETE CASCADE），
+      删除 downloads 时会自动级联删除 uploads，但为了确保完整性，我们也显式删除。
+    
+    Returns:
+        包含删除记录数的字典
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        
+        # 先统计要删除的记录数
+        cur.execute("SELECT COUNT(*) FROM downloads")
+        download_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM uploads")
+        upload_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM tg_media")
+        media_count = cur.fetchone()[0]
+        
+        # 删除所有上传记录（先删除，避免外键约束问题）
+        cur.execute("DELETE FROM uploads")
+        
+        # 删除所有下载记录
+        cur.execute("DELETE FROM downloads")
+        
+        # 删除所有 Telegram 媒体记录（因为下载记录已删除，这些媒体记录也没有用了）
+        cur.execute("DELETE FROM tg_media")
+        
+        conn.commit()
+        
+        return {
+            'deleted_downloads': download_count,
+            'deleted_uploads': upload_count,
+            'deleted_media': media_count
+        }
+
+
 def get_upload_statistics():
     """
     获取上传统计信息。
@@ -915,21 +1524,36 @@ def get_upload_statistics():
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
+        # 统计各状态的数量
+        cur.execute(
+            """
+            SELECT status, COUNT(*) as count
+            FROM uploads
+            GROUP BY status
+            """
+        )
+        status_counts = {row['status']: row['count'] for row in cur.fetchall()}
+        
+        # 统计已清理的数量
+        cur.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM uploads
+            WHERE cleaned_at IS NOT NULL
+            """
+        )
+        cleaned_count = cur.fetchone()['count']
+        
         # 总体统计
         cur.execute(
             """
             SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN status = 'uploading' THEN 1 ELSE 0 END) as uploading,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
                 SUM(total_size) as total_size,
                 SUM(uploaded_size) as uploaded_size
             FROM uploads
             """
         )
-        stats = dict(cur.fetchone())
+        size_stats = dict(cur.fetchone())
         
         # 按目标统计
         cur.execute(
@@ -939,12 +1563,23 @@ def get_upload_statistics():
             GROUP BY upload_target
             """
         )
-        stats['by_target'] = {row['upload_target']: row['count'] for row in cur.fetchall()}
+        by_target = {row['upload_target']: row['count'] for row in cur.fetchall()}
         
         # 失败原因统计
-        stats['by_failure_reason'] = count_uploads_by_failure_reason()
+        by_failure_reason = count_uploads_by_failure_reason()
         
-        return stats
+        return {
+            'total': sum(status_counts.values()),
+            'uploading': status_counts.get('uploading', 0),
+            'completed': status_counts.get('completed', 0),
+            'failed': status_counts.get('failed', 0),
+            'pending': status_counts.get('pending', 0) + status_counts.get('waiting_download', 0),
+            'cleaned': cleaned_count,
+            'total_size': size_stats.get('total_size'),
+            'uploaded_size': size_stats.get('uploaded_size') or 0,
+            'by_target': by_target,
+            'by_failure_reason': by_failure_reason
+        }
 
 
 def get_pending_uploads(upload_target: str = None):

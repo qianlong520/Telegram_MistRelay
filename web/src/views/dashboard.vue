@@ -105,12 +105,12 @@ import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useIntervalFn, useResizeObserver } from '@vueuse/core'
 import * as echarts from 'echarts'
 import {
-  Download,
   Check,
-  Clock,
-  Warning
+  Warning,
+  Delete,
+  Document
 } from '@element-plus/icons-vue'
-import { getStatus, getDownloads, getSystemTrend, type TrendPoint } from '@/api'
+import { getStatus, getDownloads, getSystemTrend, getDownloadStatistics, getUploadStatistics, type TrendPoint } from '@/api'
 import type { ServerStatus, DownloadRecord } from '@/types/api'
 import { formatDate, getStatusText, getStatusTagType } from '@/utils/formatters'
 
@@ -121,25 +121,18 @@ let chartInstance: echarts.ECharts | null = null
 
 const stats = ref([
   {
-    key: 'downloading',
-    label: '正在下载',
-    value: 0,
-    icon: Download,
-    color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
-  },
-  {
     key: 'completed',
-    label: '已完成',
+    label: '完成',
     value: 0,
     icon: Check,
     color: 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
   },
   {
-    key: 'waiting',
-    label: '等待中',
+    key: 'cleaned',
+    label: '清理',
     value: 0,
-    icon: Clock,
-    color: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'
+    icon: Delete,
+    color: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)'
   },
   {
     key: 'failed',
@@ -147,6 +140,13 @@ const stats = ref([
     value: 0,
     icon: Warning,
     color: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'
+  },
+  {
+    key: 'total',
+    label: '总计',
+    value: 0,
+    icon: Document,
+    color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
   }
 ])
 
@@ -162,11 +162,6 @@ function initChart() {
         let result = params[0].axisValueLabel + '<br/>'
         params.forEach((param: any) => {
           let value = param.value
-          let unit = 'B/s'
-          
-          if (param.seriesName === 'IO占用') {
-             // IO
-          }
           
           if (value > 1024 * 1024) {
             value = (value / (1024 * 1024)).toFixed(2) + ' MB/s'
@@ -198,10 +193,22 @@ function initChart() {
       data: [],
       axisLabel: {
         formatter: (value: string) => {
-          const date = new Date(parseInt(value))
-          return date.getHours().toString().padStart(2, '0') + ':' + 
-                 date.getMinutes().toString().padStart(2, '0') + ':' + 
-                 date.getSeconds().toString().padStart(2, '0')
+          // 时间戳是UTC时间戳（毫秒），需要转换为中国时区（UTC+8）
+          const timestamp = parseInt(value)
+          const date = new Date(timestamp)
+          
+          // 获取UTC时间的小时、分钟、秒
+          const utcHours = date.getUTCHours()
+          const utcMinutes = date.getUTCMinutes()
+          const utcSeconds = date.getUTCSeconds()
+          
+          // 转换为中国时区（UTC+8）
+          const cnHours = (utcHours + 8) % 24
+          
+          // 格式化时间
+          return cnHours.toString().padStart(2, '0') + ':' + 
+                 utcMinutes.toString().padStart(2, '0') + ':' + 
+                 utcSeconds.toString().padStart(2, '0')
         }
       }
     },
@@ -288,7 +295,29 @@ function fetchData() {
     })
     .catch(err => console.error('获取状态失败:', err))
 
-  // 获取最近下载
+  // 获取下载统计和上传统计
+  Promise.all([
+    getDownloadStatistics(),
+    getUploadStatistics()
+  ])
+    .then(([downloadResponse, uploadResponse]) => {
+      const downloadData = downloadResponse.success ? downloadResponse.data : null
+      const uploadData = uploadResponse.success ? uploadResponse.data : null
+      
+      if (downloadData || uploadData) {
+        // 总数应该是下载任务总数（因为上传任务关联下载任务，避免重复计算）
+        const totalTasks = downloadData?.total || 0
+        updateStats({
+          completed: downloadData?.completed || 0,
+          cleaned: uploadData?.cleaned || 0,
+          failed: downloadData?.failed || 0,
+          total: totalTasks
+        })
+      }
+    })
+    .catch(err => console.error('获取统计失败:', err))
+
+  // 获取最近下载（仅用于显示最近活动）
   getDownloads(10)
     .then(response => {
       if (response.success) {
@@ -302,12 +331,9 @@ function fetchData() {
             }
           })
           recentDownloads.value = allDownloads.slice(0, 10)
-          // 更新统计
-          updateStats(allDownloads)
         } else {
           // 非分组数据
           recentDownloads.value = (response.data as DownloadRecord[]) || []
-          updateStats((response.data as DownloadRecord[]) || [])
         }
       }
     })
@@ -316,9 +342,24 @@ function fetchData() {
   fetchTrend()
 }
 
-function updateStats(downloads: DownloadRecord[]) {
+function updateStats(statistics: { completed: number; cleaned: number; failed: number; total: number }) {
   stats.value.forEach(stat => {
-    stat.value = downloads.filter(d => d.status === stat.key).length
+    switch (stat.key) {
+      case 'completed':
+        stat.value = statistics.completed || 0
+        break
+      case 'cleaned':
+        stat.value = statistics.cleaned || 0
+        break
+      case 'failed':
+        stat.value = statistics.failed || 0
+        break
+      case 'total':
+        stat.value = statistics.total || 0
+        break
+      default:
+        stat.value = 0
+    }
   })
 }
 

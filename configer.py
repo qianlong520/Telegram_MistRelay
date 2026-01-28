@@ -96,6 +96,10 @@ UP_TELEGRAM = result.get('UP_TELEGRAM', False)
 UP_ONEDRIVE = result.get('UP_ONEDRIVE', False)
 RCLONE_REMOTE = result.get('RCLONE_REMOTE', 'onedrive')
 RCLONE_PATH = result.get('RCLONE_PATH', '/Downloads')
+# 谷歌网盘配置
+UP_GOOGLE_DRIVE = result.get('UP_GOOGLE_DRIVE', False)
+GOOGLE_DRIVE_REMOTE = result.get('GOOGLE_DRIVE_REMOTE', 'gdrive')
+GOOGLE_DRIVE_PATH = result.get('GOOGLE_DRIVE_PATH', '/Downloads')
 # 自动删除本地文件设置
 AUTO_DELETE_AFTER_UPLOAD = result.get('AUTO_DELETE_AFTER_UPLOAD', True)
 RPC_SECRET = result.get('RPC_SECRET') or ''
@@ -122,6 +126,10 @@ SEND_STREAM_LINK = result.get('SEND_STREAM_LINK', False)
 SKIP_SMALL_FILES = result.get('SKIP_SMALL_FILES', False)
 # 最小文件大小（MB），小于此大小的文件将被跳过（默认100MB）
 MIN_FILE_SIZE_MB = result.get('MIN_FILE_SIZE_MB', 100)
+# 消息队列最大并发处理数量（默认5，限制同时处理的消息数量）
+MAX_CONCURRENT_MESSAGES = result.get('MAX_CONCURRENT_MESSAGES', 5)
+# aria2最大并发下载数（默认5，限制同时下载的任务数量）
+ARIA2_MAX_CONCURRENT_DOWNLOADS = result.get('ARIA2_MAX_CONCURRENT_DOWNLOADS', 5)
 # 多机器人负载配置
 # 如果配置了额外的BOT_TOKEN，将启用多机器人负载均衡
 # MULTI_BOT_TOKENS 可以是字符串（逗号分隔）或列表
