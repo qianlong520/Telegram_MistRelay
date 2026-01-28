@@ -391,6 +391,8 @@ class AsyncAria2Client:
             aria2_status: aria2返回的任务状态信息
         """
         try:
+            from db import get_download_by_id, get_download_id_by_gid, mark_download_paused, mark_download_resumed
+            
             status = aria2_status.get('status')
             
             # 检查是否已经处理过完成状态
@@ -400,9 +402,22 @@ class AsyncAria2Client:
             
             print(f"[同步] 任务 {gid[:8]}... 状态: {status}")
             
+            # 获取数据库中的当前状态
+            download_id = get_download_id_by_gid(gid)
+            db_status = None
+            if download_id:
+                download = get_download_by_id(download_id)
+                if download:
+                    db_status = download.get('status')
+            
             # 根据aria2状态触发相应处理
             if status == 'active':
                 # 任务正在下载
+                # 如果数据库状态是 paused，说明任务从暂停恢复
+                if db_status == 'paused':
+                    print(f"[同步] 检测到任务 {gid[:8]}... 从暂停恢复,更新状态")
+                    mark_download_resumed(gid)
+                
                 # 检查是否有对应的消息对象,如果没有说明可能错过了开始事件
                 if gid not in self.download_messages:
                     print(f"[同步] 检测到活动任务 {gid[:8]}... 但无消息记录,触发开始事件")
@@ -416,6 +431,11 @@ class AsyncAria2Client:
                 
             elif status == 'waiting':
                 # 任务等待中
+                # 如果数据库状态是 paused，说明任务从暂停恢复
+                if db_status == 'paused':
+                    print(f"[同步] 检测到任务 {gid[:8]}... 从暂停恢复(等待中),更新状态")
+                    mark_download_resumed(gid)
+                
                 if gid not in self.download_messages:
                     print(f"[同步] 检测到等待任务 {gid[:8]}...,触发开始事件")
                     event = {
@@ -423,6 +443,13 @@ class AsyncAria2Client:
                         'params': [{'gid': gid}]
                     }
                     await self.download_handler.on_download_start(event, self.tell_status)
+            
+            elif status == 'paused':
+                # 任务已暂停
+                # 如果数据库状态不是 paused，更新数据库状态
+                if db_status != 'paused':
+                    print(f"[同步] ⏸️ 检测到任务 {gid[:8]}... 已暂停,更新数据库状态")
+                    mark_download_paused(gid)
                 
             elif status == 'complete':
                 # 任务已完成

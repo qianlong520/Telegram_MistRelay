@@ -391,6 +391,20 @@ def _notify_ws_download_update(gid: str):
         if download_id:
             download = get_download_by_id(download_id)
             if download:
+                # 获取关联的上传记录，确保数据一致性
+                uploads = get_uploads_by_download(download_id)
+                uploads_data = []
+                for upload in uploads:
+                    uploads_data.append({
+                        "id": upload.get('id'),
+                        "upload_target": upload.get('upload_target'),
+                        "status": upload.get('status'),
+                        "uploaded_size": upload.get('uploaded_size'),
+                        "total_size": upload.get('total_size'),
+                        "upload_speed": upload.get('upload_speed'),
+                        "cleaned_at": upload.get('cleaned_at'),
+                    })
+                
                 # 异步推送更新
                 loop = None
                 try:
@@ -408,6 +422,7 @@ def _notify_ws_download_update(gid: str):
                         "completed_length": download.get('completed_length'),
                         "total_length": download.get('total_length'),
                         "download_speed": download.get('download_speed'),
+                        "uploads": uploads_data,  # 包含上传信息，确保数据一致性
                     }))
     except Exception as e:
         # 静默失败，不影响主流程
@@ -557,6 +572,41 @@ def mark_download_failed(gid: str, error_message: str | None):
              WHERE gid = ?
             """,
             (error_message, now, gid),
+        )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
+
+
+def mark_download_paused(gid: str):
+    """标记下载暂停。"""
+    now = _now_iso()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE downloads
+               SET status = 'paused',
+                   download_speed = 0,
+                   updated_at = ?
+             WHERE gid = ?
+            """,
+            (now, gid),
+        )
+    # 推送 WebSocket 更新
+    _notify_ws_download_update(gid)
+
+
+def mark_download_resumed(gid: str):
+    """标记下载恢复。"""
+    now = _now_iso()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE downloads
+               SET status = 'downloading',
+                   updated_at = ?
+             WHERE gid = ? AND status = 'paused'
+            """,
+            (now, gid),
         )
     # 推送 WebSocket 更新
     _notify_ws_download_update(gid)
@@ -1055,6 +1105,64 @@ def update_upload_status(upload_id: int, status: str, **kwargs):
         _notify_ws_upload_update(upload_id)
 
 
+def check_and_update_download_status_if_file_exists(upload_id: int, file_path: str):
+    """
+    检查并更新下载记录状态：如果文件已存在且下载记录状态为pending，则标记为completed。
+    
+    Args:
+        upload_id: 上传记录 ID
+        file_path: 文件路径
+    """
+    import os
+    try:
+        # 获取关联的下载ID
+        download_id = None
+        with db_cursor() as cur:
+            cur.execute("SELECT download_id FROM uploads WHERE id = ?", (upload_id,))
+            row = cur.fetchone()
+            if row:
+                download_id = row[0]
+        
+        if not download_id:
+            return
+        
+        # 获取下载记录
+        download_record = get_download_by_id(download_id)
+        if not download_record:
+            return
+        
+        # 如果下载记录状态为pending且文件已存在，更新为completed
+        if download_record.get('status') == 'pending' and os.path.exists(file_path):
+            try:
+                file_size = os.path.getsize(file_path)
+                now = _now_iso()
+                with db_cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE downloads
+                           SET status = 'completed',
+                               local_path = COALESCE(?, local_path),
+                               total_length = COALESCE(?, total_length),
+                               completed_length = COALESCE(?, completed_length),
+                               completed_at = COALESCE(completed_at, ?),
+                               updated_at = ?
+                         WHERE id = ?
+                        """,
+                        (file_path, file_size, file_size, now, now, download_id),
+                    )
+                # 推送 WebSocket 更新
+                gid = download_record.get('gid')
+                if gid:
+                    _notify_ws_download_update(gid)
+                else:
+                    _notify_ws_statistics_update()
+                logging.info(f"下载记录 {download_id} 已更新为completed（文件已存在）")
+            except Exception as e:
+                logging.warning(f"更新下载记录状态失败: {e}")
+    except Exception as e:
+        logging.debug(f"检查下载记录状态失败: {e}")
+
+
 def mark_upload_started(upload_id: int, total_size: int = None):
     """
     标记上传开始时间。
@@ -1510,6 +1618,90 @@ def delete_all_downloads():
             'deleted_downloads': download_count,
             'deleted_uploads': upload_count,
             'deleted_media': media_count
+        }
+
+
+def delete_download_record(download_id: int, delete_local_file: bool = True):
+    """
+    删除单个下载记录及其关联的上传记录和本地文件。
+    
+    Args:
+        download_id: 下载记录ID
+        delete_local_file: 是否删除本地文件（默认True）
+    
+    Returns:
+        dict: 包含删除结果的字典
+    """
+    import os
+    
+    with get_connection() as conn:
+        cur = conn.cursor()
+        
+        # 获取下载记录信息（包括GID和本地路径）
+        cur.execute(
+            """
+            SELECT gid, local_path, file_unique_id
+            FROM downloads
+            WHERE id = ?
+            """,
+            (download_id,)
+        )
+        download_row = cur.fetchone()
+        
+        if not download_row:
+            return {
+                'success': False,
+                'error': '下载记录不存在'
+            }
+        
+        gid = download_row[0]
+        local_path = download_row[1]
+        file_unique_id = download_row[2]
+        
+        # 注意：删除记录时不尝试从Aria2移除任务
+        # 因为删除记录是删除数据库记录，不是删除Aria2任务
+        # 如果用户想删除Aria2任务，应该使用删除任务的API（DELETE /api/downloads/{gid}）
+        # 这样可以避免历史遗留记录（GID已不存在）导致的错误
+        
+        # 删除本地文件（如果存在且需要删除）
+        deleted_file = False
+        if delete_local_file and local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+                deleted_file = True
+            except Exception as e:
+                logging.warning(f"删除本地文件失败: {e}")
+        
+        # 删除上传记录（外键约束会自动级联删除，但显式删除更清晰）
+        cur.execute("DELETE FROM uploads WHERE download_id = ?", (download_id,))
+        upload_count = cur.rowcount
+        
+        # 删除下载记录
+        cur.execute("DELETE FROM downloads WHERE id = ?", (download_id,))
+        download_deleted = cur.rowcount > 0
+        
+        # 检查是否还有其他下载记录使用同一个 file_unique_id
+        cur.execute(
+            "SELECT COUNT(*) FROM downloads WHERE file_unique_id = ?",
+            (file_unique_id,)
+        )
+        remaining_downloads = cur.fetchone()[0]
+        
+        # 如果没有其他下载记录使用这个媒体，删除媒体记录
+        media_deleted = False
+        if remaining_downloads == 0:
+            cur.execute("DELETE FROM tg_media WHERE file_unique_id = ?", (file_unique_id,))
+            media_deleted = cur.rowcount > 0
+        
+        conn.commit()
+        
+        return {
+            'success': True,
+            'download_deleted': download_deleted,
+            'upload_count': upload_count,
+            'media_deleted': media_deleted,
+            'file_deleted': deleted_file,
+            'local_path': local_path if deleted_file else None
         }
 
 

@@ -56,7 +56,6 @@ const breadcrumb = computed(() => {
   const routeMap: Record<string, string> = {
     '/downloads': '下载管理',
     '/tasks': '任务队列',
-    '/status': '系统状态',
     '/settings': '系统设置',
     '/system': '系统管理'
   }

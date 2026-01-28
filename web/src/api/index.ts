@@ -6,7 +6,8 @@ import type {
   DockerRestartResponse,
   DockerLogsResponse,
   ConfigResponse,
-  ConfigUpdateResponse
+  ConfigUpdateResponse,
+  SystemResourcesResponse
 } from '@/types/api'
 
 const api = axios.create({
@@ -39,6 +40,10 @@ export function getDockerLogs(lines = 100): Promise<DockerLogsResponse> {
   return api.get<DockerLogsResponse>('/system/docker/logs', {
     params: { lines }
   }).then(response => response.data)
+}
+
+export function getSystemResources(): Promise<SystemResourcesResponse> {
+  return api.get<SystemResourcesResponse>('/system/resources').then(response => response.data)
 }
 
 export function getConfig(category?: string): Promise<ConfigResponse> {
@@ -151,4 +156,50 @@ export function getUploads(limit = 100, status?: string, uploadTarget?: string):
   return api.get<UploadsResponse>('/uploads', {
     params: { limit, status, upload_target: uploadTarget }
   }).then(response => response.data)
+}
+
+// ==================== 下载任务控制 API ====================
+
+export interface TaskControlResponse {
+  success: boolean
+  message?: string
+  new_gid?: string
+  error?: string
+}
+
+export function retryDownload(gid: string): Promise<TaskControlResponse> {
+  return api.post<TaskControlResponse>(`/downloads/${gid}/retry`).then(response => response.data)
+}
+
+export function deleteDownload(gid: string): Promise<TaskControlResponse> {
+  return api.delete<TaskControlResponse>(`/downloads/${gid}`).then(response => response.data)
+}
+
+export interface DeleteRecordResponse {
+  success: boolean
+  message?: string
+  data?: {
+    download_deleted: boolean
+    upload_count: number
+    media_deleted: boolean
+    file_deleted: boolean
+    local_path?: string
+  }
+  error?: string
+}
+
+export function deleteDownloadRecord(downloadId: number, deleteFile: boolean = true): Promise<DeleteRecordResponse> {
+  return api.delete<DeleteRecordResponse>(`/downloads/record/${downloadId}`, {
+    params: { delete_file: deleteFile }
+  }).then(response => response.data)
+}
+
+// ==================== 上传任务控制 API ====================
+
+export function retryUpload(uploadId: number): Promise<TaskControlResponse> {
+  return api.post<TaskControlResponse>(`/uploads/${uploadId}/retry`).then(response => response.data)
+}
+
+export function deleteUpload(uploadId: number): Promise<TaskControlResponse> {
+  return api.delete<TaskControlResponse>(`/uploads/${uploadId}`).then(response => response.data)
 }

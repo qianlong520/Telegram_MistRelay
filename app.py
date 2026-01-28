@@ -820,6 +820,14 @@ async def main():
                     bad_status_filter = BadStatusLineFilter()
                     aiohttp_logger.addFilter(bad_status_filter)
                     
+                    # 在启动Web服务器之前，先设置aria2客户端（确保路由可以访问）
+                    try:
+                        from WebStreamer.bot.plugins.stream import set_aria2_client
+                        set_aria2_client(client)
+                        log.info('已提前设置aria2客户端到直链功能（Web服务器启动前）')
+                    except Exception as e:
+                        log.warning(f'提前设置aria2客户端失败: {e}')
+                    
                     stream_server = web.AppRunner(web_server())
                     await stream_server.setup()
                     

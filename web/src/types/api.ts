@@ -30,7 +30,7 @@ export interface DownloadRecord {
   id: number
   gid?: string
   source_url?: string
-  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped'
+  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped' | 'paused' | 'waiting'
   total_length?: number
   completed_length?: number
   download_speed?: number
@@ -119,5 +119,29 @@ export interface ConfigUpdateResponse {
   message?: string
   updated_count?: number
   needs_restart?: boolean
+  error?: string
+}
+
+export interface SystemResources {
+  cpu: {
+    percent: number
+  }
+  memory: {
+    percent: number
+    total: number
+    used: number
+    available: number
+  }
+  disk: {
+    percent: number
+    total: number
+    used: number
+    free: number
+  }
+}
+
+export interface SystemResourcesResponse {
+  success: boolean
+  data?: SystemResources
   error?: string
 }

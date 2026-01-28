@@ -97,6 +97,29 @@
                     {{ formatDate(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
+                
+                <el-table-column label="操作" width="160" fixed="right">
+                  <template #default="{ row }">
+                    <el-button-group>
+                      <el-button
+                        size="small"
+                        :icon="RefreshRight"
+                        :loading="operationLoading"
+                        :disabled="!row.gid && !row.source_url"
+                        @click.stop="handleRetry(row)"
+                        title="重试"
+                      />
+                      <el-button
+                        size="small"
+                        type="danger"
+                        :icon="Delete"
+                        :loading="operationLoading"
+                        @click.stop="handleDelete(row, false)"
+                        title="删除任务"
+                      />
+                    </el-button-group>
+                  </template>
+                </el-table-column>
               </el-table>
               <div class="mt-2 text-xs text-gray-500">
                 提示：点击任意行会自动切换到“全部”并展开对应消息组
@@ -173,6 +196,29 @@
                     {{ formatDate(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
+                
+                    <el-table-column label="操作" width="160" fixed="right">
+                      <template #default="{ row }">
+                        <el-button-group>
+                          <el-button
+                            size="small"
+                            :icon="RefreshRight"
+                            :loading="operationLoading"
+                            @click.stop="handleRetryUpload(row)"
+                            title="重试"
+                          />
+                          <el-button
+                            size="small"
+                            type="danger"
+                            :icon="Delete"
+                            :loading="operationLoading"
+                            :disabled="row.status === 'completed' || row.status === 'cleaned'"
+                            @click.stop="handleDeleteUpload(row)"
+                            title="删除"
+                          />
+                        </el-button-group>
+                      </template>
+                    </el-table-column>
               </el-table>
             </div>
           </el-tab-pane>
@@ -298,28 +344,23 @@
                       </template>
                     </el-table-column>
                     
-                    <el-table-column label="操作" width="120" fixed="right">
+                    <el-table-column label="操作" width="220" fixed="right">
                       <template #default="{ row }">
                         <el-button-group>
                           <el-button
-                            v-if="row.status === 'downloading'"
                             size="small"
-                            :icon="VideoPause"
-                            @click.stop="handlePause(row)"
-                            title="暂停"
-                          />
-                          <el-button
-                            v-if="row.status === 'pending'"
-                            size="small"
-                            :icon="VideoPlay"
-                            @click.stop="handleResume(row)"
-                            title="恢复"
+                            :icon="RefreshRight"
+                            :loading="operationLoading"
+                            :disabled="!row.gid && !row.source_url"
+                            @click.stop="handleRetry(row)"
+                            title="重试"
                           />
                           <el-button
                             size="small"
                             type="danger"
                             :icon="Delete"
-                            @click.stop="handleDelete(row)"
+                            :loading="operationLoading"
+                            @click.stop="handleDelete(row, activeTab === 'records')"
                             title="删除"
                           />
                         </el-button-group>
@@ -472,9 +513,19 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Files, Document, VideoPause, VideoPlay, Delete, InfoFilled, Download, Upload, Link } from '@element-plus/icons-vue'
+import { Refresh, Files, Document, Delete, InfoFilled, Download, Upload, Link, RefreshRight } from '@element-plus/icons-vue'
 import { useIntervalFn } from '@vueuse/core'
-import { getDownloads, deleteAllDownloads, getUploads, getConfig } from '@/api'
+import { 
+  getDownloads, 
+  deleteAllDownloads, 
+  getUploads, 
+  getConfig,
+  retryDownload,
+  deleteDownload,
+  deleteDownloadRecord,
+  retryUpload,
+  deleteUpload
+} from '@/api'
 import type { DownloadGroup, DownloadRecord, UploadRecord } from '@/types/api'
 import { wsClient } from '@/utils/websocket'
 import {
@@ -642,6 +693,7 @@ const activeTab = ref<'download' | 'upload' | 'records'>('download') // 默认�
 const detailDialogVisible = ref(false)
 const selectedRecord = ref<DownloadRecord | null>(null)
 const autoDeleteAfterUpload = ref<boolean>(true) // 默认启用自动清理
+const operationLoading = ref(false)
 
 // totalDownloads 已移除，不再需要
 
@@ -844,15 +896,85 @@ function handleRowClick(row: DownloadRecord) {
   detailDialogVisible.value = true
 }
 
-function handlePause(_task: any) {
-  ElMessage.info('暂停功能需要后端API支持')
+async function handleRetry(task: DownloadRecord) {
+  if (!task.gid && !task.source_url) {
+    ElMessage.warning('任务GID和源URL都不存在，无法重试')
+    return
+  }
+  
+  try {
+    operationLoading.value = true
+    // 如果有gid，使用gid重试；否则需要source_url
+    if (task.gid) {
+      const result = await retryDownload(task.gid)
+      if (result.success) {
+        ElMessage.success(result.message || '任务已重新提交到aria2')
+        fetchDownloads()
+      } else {
+        ElMessage.error(result.error || '重试失败')
+      }
+    } else if (task.source_url) {
+      // 如果没有gid但有source_url，需要先创建下载记录
+      ElMessage.warning('该任务没有GID，无法直接重试，请使用源URL重新添加')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '重试失败')
+  } finally {
+    operationLoading.value = false
+  }
 }
 
-function handleResume(_task: any) {
-  ElMessage.info('恢复功能需要后端API支持')
-}
-
-function handleDelete(task: any) {
+async function handleDelete(task: DownloadRecord, isRecordTab: boolean = false) {
+  // 如果在"记录"标签页，删除数据库记录和本地文件
+  if (isRecordTab) {
+    if (!task.id) {
+      ElMessage.warning('下载记录ID不存在')
+      return
+    }
+    
+    ElMessageBox.confirm(
+      `确定要删除记录 "${task.file_name || '未知文件'}" 吗？\n\n这将删除：\n• 数据库记录\n• 关联的上传记录\n• 本地文件（如果存在）`,
+      '确认删除记录',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    ).then(async () => {
+      try {
+        operationLoading.value = true
+        const result = await deleteDownloadRecord(task.id!, true)
+        if (result.success) {
+          const messages = []
+          messages.push('记录已删除')
+          if (result.data) {
+            if (result.data.file_deleted && result.data.local_path) {
+              messages.push(`本地文件已删除: ${result.data.local_path}`)
+            }
+            if (result.data.upload_count && result.data.upload_count > 0) {
+              messages.push(`已删除 ${result.data.upload_count} 条上传记录`)
+            }
+          }
+          ElMessage.success(messages.join('\n'))
+          fetchDownloads()
+        } else {
+          ElMessage.error(result.error || '删除失败')
+        }
+      } catch (error: any) {
+        ElMessage.error(error.message || '删除失败')
+      } finally {
+        operationLoading.value = false
+      }
+    }).catch(() => {})
+    return
+  }
+  
+  // 在其他标签页，删除aria2任务
+  if (!task.gid) {
+    ElMessage.warning('任务GID不存在')
+    return
+  }
+  
   ElMessageBox.confirm(
     `确定要删除任务 "${task.file_name || '未知文件'}" 吗？`,
     '确认删除',
@@ -861,9 +983,79 @@ function handleDelete(task: any) {
       cancelButtonText: '取消',
       type: 'warning'
     }
-  ).then(() => {
-    ElMessage.info('删除功能需要后端API支持')
-    fetchDownloads()
+  ).then(async () => {
+    try {
+      operationLoading.value = true
+      const result = await deleteDownload(task.gid!)
+      if (result.success) {
+        ElMessage.success(result.message || '任务已删除')
+        fetchDownloads()
+      } else {
+        ElMessage.error(result.error || '删除失败')
+      }
+    } catch (error: any) {
+      ElMessage.error(error.message || '删除失败')
+    } finally {
+      operationLoading.value = false
+    }
+  }).catch(() => {})
+}
+
+// 上传任务操作
+async function handleRetryUpload(upload: UploadRecord) {
+  if (!upload.id) {
+    ElMessage.warning('上传任务ID不存在')
+    return
+  }
+  
+  try {
+    operationLoading.value = true
+    const result = await retryUpload(upload.id)
+    if (result.success) {
+      const uploadTarget = upload.upload_target === 'onedrive' ? 'OneDrive' : 
+                          upload.upload_target === 'gdrive' ? 'Google Drive' : 
+                          upload.upload_target === 'telegram' ? 'Telegram' : upload.upload_target
+      ElMessage.success(result.message || `上传任务已重新提交${uploadTarget === 'Telegram' ? 'Telegram' : 'rclone'}上传`)
+      fetchUploads()
+    } else {
+      ElMessage.error(result.error || '重试失败')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '重试失败')
+  } finally {
+    operationLoading.value = false
+  }
+}
+
+async function handleDeleteUpload(upload: UploadRecord) {
+  if (!upload.id) {
+    ElMessage.warning('上传任务ID不存在')
+    return
+  }
+  
+  ElMessageBox.confirm(
+    `确定要删除上传任务吗？`,
+    '确认删除',
+    {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  ).then(async () => {
+    try {
+      operationLoading.value = true
+      const result = await deleteUpload(upload.id!)
+      if (result.success) {
+        ElMessage.success(result.message || '上传任务已删除')
+        fetchUploads()
+      } else {
+        ElMessage.error(result.error || '删除失败')
+      }
+    } catch (error: any) {
+      ElMessage.error(error.message || '删除失败')
+    } finally {
+      operationLoading.value = false
+    }
   }).catch(() => {})
 }
 
@@ -1008,7 +1200,7 @@ onMounted(() => {
 
 // 从 WebSocket 更新下载记录
 function updateDownloadFromWS(data: any) {
-  const { gid, download_id, status, completed_length, total_length, download_speed } = data
+  const { gid, download_id, status, completed_length, total_length, download_speed, uploads: uploads_data } = data
   
   if (!gid && !download_id) {
     return // 没有有效的标识符，跳过更新
@@ -1033,7 +1225,31 @@ function updateDownloadFromWS(data: any) {
         if (completed_length !== undefined) updates.completed_length = completed_length
         if (total_length !== undefined) updates.total_length = total_length
         if (download_speed !== undefined) updates.download_speed = download_speed
-        // 不更新updated_at，避免触发不必要的响应式更新导致排序跳动
+        
+        // 如果 WebSocket 推送了上传信息，更新上传列表（确保数据一致性）
+        if (uploads_data && Array.isArray(uploads_data)) {
+          // 确保 uploads 数组存在
+          if (!download.uploads) {
+            download.uploads = []
+          }
+          
+          // 更新或添加上传记录
+          for (const uploadUpdate of uploads_data) {
+            const existingUploadIndex = download.uploads.findIndex((u: UploadRecord) => u.id === uploadUpdate.id)
+            if (existingUploadIndex !== -1) {
+              // 更新现有上传记录
+              Object.assign(download.uploads[existingUploadIndex], uploadUpdate)
+            } else {
+              // 添加新上传记录
+              download.uploads.push(uploadUpdate as UploadRecord)
+            }
+          }
+          
+          // 移除不在推送列表中的上传记录（如果下载ID匹配）
+          download.uploads = download.uploads.filter((u: UploadRecord) => 
+            uploads_data.some((ud: any) => ud.id === u.id)
+          )
+        }
         
         // 更新记录
         Object.assign(download, updates)

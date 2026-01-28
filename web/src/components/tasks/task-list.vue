@@ -43,27 +43,22 @@
         </template>
       </el-table-column>
       
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }">
           <el-button-group>
             <el-button
-              v-if="status === 'downloading'"
               size="small"
-              :icon="VideoPause"
-              @click="handlePause(row)"
-              title="暂停"
-            />
-            <el-button
-              v-if="status === 'pending'"
-              size="small"
-              :icon="VideoPlay"
-              @click="handleResume(row)"
-              title="恢复"
+              :icon="Refresh"
+              :loading="loading"
+              :disabled="!row.gid && !row.source_url"
+              @click="handleRetry(row)"
+              title="重试"
             />
             <el-button
               size="small"
               type="danger"
               :icon="Delete"
+              :loading="loading"
               @click="handleDelete(row)"
               title="删除"
             />
@@ -81,7 +76,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VideoPause, VideoPlay, Delete } from '@element-plus/icons-vue'
+import { Delete, Refresh } from '@element-plus/icons-vue'
 import type { DownloadRecord } from '@/types/api'
 import {
   formatSize,
@@ -90,6 +85,10 @@ import {
   getStatusText,
   getStatusTagType
 } from '@/utils/formatters'
+import {
+  retryDownload,
+  deleteDownload
+} from '@/api'
 
 interface Props {
   tasks: DownloadRecord[]
@@ -114,17 +113,38 @@ function getProgressStatus(status?: string): 'success' | 'exception' | 'warning'
   return 'warning'
 }
 
-function handlePause(task: DownloadRecord) {
-  ElMessage.info('暂停功能需要后端API支持')
-  // TODO: 调用API暂停任务
+async function handleRetry(task: DownloadRecord) {
+  if (!task.gid && !task.source_url) {
+    ElMessage.warning('任务GID和源URL都不存在，无法重试')
+    return
+  }
+  
+  try {
+    loading.value = true
+    if (task.gid) {
+      const result = await retryDownload(task.gid)
+      if (result.success) {
+        ElMessage.success(result.message || '任务已重新提交到aria2')
+        emit('refresh')
+      } else {
+        ElMessage.error(result.error || '重试失败')
+      }
+    } else if (task.source_url) {
+      ElMessage.warning('该任务没有GID，无法直接重试，请使用源URL重新添加')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '重试失败')
+  } finally {
+    loading.value = false
+  }
 }
 
-function handleResume(task: DownloadRecord) {
-  ElMessage.info('恢复功能需要后端API支持')
-  // TODO: 调用API恢复任务
-}
-
-function handleDelete(task: DownloadRecord) {
+async function handleDelete(task: DownloadRecord) {
+  if (!task.gid) {
+    ElMessage.warning('任务GID不存在')
+    return
+  }
+  
   ElMessageBox.confirm(
     `确定要删除任务 "${task.file_name || '未知文件'}" 吗？`,
     '确认删除',
@@ -133,10 +153,21 @@ function handleDelete(task: DownloadRecord) {
       cancelButtonText: '取消',
       type: 'warning'
     }
-  ).then(() => {
-    ElMessage.info('删除功能需要后端API支持')
-    // TODO: 调用API删除任务
-    emit('refresh')
+  ).then(async () => {
+    try {
+      loading.value = true
+      const result = await deleteDownload(task.gid!)
+      if (result.success) {
+        ElMessage.success(result.message || '任务已删除')
+        emit('refresh')
+      } else {
+        ElMessage.error(result.error || '删除失败')
+      }
+    } catch (error: any) {
+      ElMessage.error(error.message || '删除失败')
+    } finally {
+      loading.value = false
+    }
   }).catch(() => {})
 }
 </script>

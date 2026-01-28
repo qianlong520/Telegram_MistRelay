@@ -203,6 +203,11 @@ class UploadHandler:
             # 标记上传开始
             if upload_id:
                 try:
+                    # 检查并更新下载记录状态（如果文件已存在且下载记录状态为pending）
+                    if os.path.exists(file_path):
+                        from db import check_and_update_download_status_if_file_exists
+                        check_and_update_download_status_if_file_exists(upload_id, file_path)
+                    
                     # 获取文件大小，用于设置 total_size
                     file_size_bytes = 0
                     if os.path.exists(file_path):
@@ -744,6 +749,11 @@ class UploadHandler:
             # 标记上传开始并设置文件大小
             if upload_id:
                 try:
+                    # 检查并更新下载记录状态（如果文件已存在且下载记录状态为pending）
+                    if os.path.exists(file_path):
+                        from db import check_and_update_download_status_if_file_exists
+                        check_and_update_download_status_if_file_exists(upload_id, file_path)
+                    
                     # 获取文件大小，用于设置 total_size
                     file_size_bytes = 0
                     if os.path.exists(file_path):

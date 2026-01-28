@@ -9,7 +9,8 @@ from typing import Optional
 from configer import ADMIN_ID, UP_TELEGRAM, UP_ONEDRIVE, UP_GOOGLE_DRIVE, FORWARD_ID, AUTO_DELETE_AFTER_UPLOAD, GOOGLE_DRIVE_REMOTE, GOOGLE_DRIVE_PATH
 from util import get_file_name, byte2_readable, hum_convert, progress
 from db import (
-    mark_download_completed, mark_download_failed, get_download_id_by_gid,
+    mark_download_completed, mark_download_failed, mark_download_paused,
+    mark_download_resumed, get_download_id_by_gid,
     create_upload, get_uploads_by_download
 )
 
@@ -422,6 +423,13 @@ class DownloadHandler:
         """
         gid = result['params'][0]['gid']
         print(f"===========下载 暂停 任务id:{gid}")
+        
+        # 更新数据库中的下载任务状态为暂停（会自动触发WebSocket推送）
+        try:
+            mark_download_paused(gid)
+        except Exception as db_e:
+            print(f"更新数据库下载暂停状态出错: {db_e}")
+        
         # 静默处理：不再发送Telegram消息，暂停状态通过WebSocket推送
     
     async def on_download_error(self, result, tell_status_func):

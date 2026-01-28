@@ -29,21 +29,69 @@
       </el-col>
       
       <el-col :xs="24" :lg="8">
-        <el-card shadow="hover" class="chart-card">
+        <el-card shadow="hover" class="system-load-card">
           <template #header>
             <span>系统负载</span>
           </template>
-          <div v-if="status" class="load-status">
-            <div v-for="(load, bot) in status.loads" :key="bot" class="load-item">
-              <div class="load-header">
-                <span class="load-bot">{{ bot }}</span>
-                <el-tag :type="getLoadTagType(load)" size="small">{{ load }}</el-tag>
+          <div v-if="systemResources" class="system-resources">
+            <!-- CPU -->
+            <div class="resource-item">
+              <div class="resource-header">
+                <div class="resource-label">
+                  <el-icon><Cpu /></el-icon>
+                  <span>CPU</span>
+                </div>
+                <el-tag :type="getResourceTagType(systemResources.cpu.percent)" size="small">
+                  {{ systemResources.cpu.percent.toFixed(1) }}%
+                </el-tag>
               </div>
               <el-progress
-                :percentage="getLoadPercentage(load)"
-                :color="getLoadColor(load)"
+                :percentage="systemResources.cpu.percent"
+                :color="getResourceColor(systemResources.cpu.percent)"
                 :stroke-width="8"
               />
+            </div>
+            
+            <!-- 内存 -->
+            <div class="resource-item">
+              <div class="resource-header">
+                <div class="resource-label">
+                  <el-icon><DataBoard /></el-icon>
+                  <span>内存</span>
+                </div>
+                <el-tag :type="getResourceTagType(systemResources.memory.percent)" size="small">
+                  {{ systemResources.memory.percent.toFixed(1) }}%
+                </el-tag>
+              </div>
+              <el-progress
+                :percentage="systemResources.memory.percent"
+                :color="getResourceColor(systemResources.memory.percent)"
+                :stroke-width="8"
+              />
+              <div class="resource-detail">
+                {{ formatBytes(systemResources.memory.used) }} / {{ formatBytes(systemResources.memory.total) }}
+              </div>
+            </div>
+            
+            <!-- 硬盘 -->
+            <div class="resource-item">
+              <div class="resource-header">
+                <div class="resource-label">
+                  <el-icon><Files /></el-icon>
+                  <span>硬盘</span>
+                </div>
+                <el-tag :type="getResourceTagType(systemResources.disk.percent)" size="small">
+                  {{ systemResources.disk.percent.toFixed(1) }}%
+                </el-tag>
+              </div>
+              <el-progress
+                :percentage="systemResources.disk.percent"
+                :color="getResourceColor(systemResources.disk.percent)"
+                :stroke-width="8"
+              />
+              <div class="resource-detail">
+                {{ formatBytes(systemResources.disk.used) }} / {{ formatBytes(systemResources.disk.total) }}
+              </div>
             </div>
           </div>
           <el-skeleton v-else :rows="4" animated />
@@ -54,15 +102,21 @@
     <!-- 最近活动 -->
     <el-row :gutter="20" class="activity-row">
       <el-col :xs="24" :lg="12">
-        <el-card shadow="hover">
+        <el-card shadow="hover" class="activity-card">
           <template #header>
             <div class="card-header">
               <span>最近下载</span>
               <el-button size="small" @click="$router.push('/downloads')">查看全部</el-button>
             </div>
           </template>
-          <el-table :data="recentDownloads" style="width: 100%" size="small">
-            <el-table-column prop="file_name" label="文件名" show-overflow-tooltip />
+          <el-table 
+            :data="recentDownloads" 
+            style="width: 100%" 
+            size="small"
+            :show-header="recentDownloads.length > 0"
+            empty-text="暂无下载记录"
+          >
+            <el-table-column prop="file_name" label="文件名" show-overflow-tooltip min-width="120" />
             <el-table-column label="状态" width="80">
               <template #default="{ row }">
                 <el-tag :type="getStatusTagType(row.status)" size="small">
@@ -80,19 +134,39 @@
       </el-col>
       
       <el-col :xs="24" :lg="12">
-        <el-card shadow="hover">
+        <el-card shadow="hover" class="activity-card">
           <template #header>
             <span>系统信息</span>
           </template>
-          <el-descriptions v-if="status" :column="1" border size="small">
-            <el-descriptions-item label="运行状态">
-              <el-tag type="success" size="small">{{ status.server_status }}</el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item label="运行时长">{{ status.uptime }}</el-descriptions-item>
-            <el-descriptions-item label="Telegram Bot">{{ status.telegram_bot }}</el-descriptions-item>
-            <el-descriptions-item label="已连接机器人">{{ status.connected_bots }}</el-descriptions-item>
-            <el-descriptions-item label="版本">{{ status.version }}</el-descriptions-item>
-          </el-descriptions>
+          <div v-if="status" class="system-info-content">
+            <el-descriptions :column="1" border size="small" class="system-descriptions">
+              <el-descriptions-item label="运行状态">
+                <el-tag type="success" size="small">{{ status.server_status }}</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="运行时长">{{ status.uptime }}</el-descriptions-item>
+              <el-descriptions-item label="Telegram Bot">{{ status.telegram_bot }}</el-descriptions-item>
+              <el-descriptions-item label="已连接机器人">{{ status.connected_bots }}</el-descriptions-item>
+              <el-descriptions-item label="版本">{{ status.version }}</el-descriptions-item>
+            </el-descriptions>
+            
+            <!-- 机器人负载 -->
+            <div v-if="status.loads && Object.keys(status.loads).length > 0" class="bot-loads">
+              <div class="bot-loads-title">机器人负载</div>
+              <div class="bot-loads-list">
+                <div v-for="(load, bot) in status.loads" :key="bot" class="bot-load-item">
+                  <div class="bot-load-header">
+                    <span class="bot-load-name">{{ bot }}</span>
+                    <el-tag :type="getLoadTagType(load)" size="small">{{ load }}</el-tag>
+                  </div>
+                  <el-progress
+                    :percentage="getLoadPercentage(load)"
+                    :color="getLoadColor(load)"
+                    :stroke-width="6"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
           <el-skeleton v-else :rows="5" animated />
         </el-card>
       </el-col>
@@ -108,13 +182,17 @@ import {
   Check,
   Warning,
   Delete,
-  Document
+  Document,
+  Cpu,
+  DataBoard,
+  Files
 } from '@element-plus/icons-vue'
-import { getStatus, getDownloads, getSystemTrend, getDownloadStatistics, getUploadStatistics, type TrendPoint } from '@/api'
-import type { ServerStatus, DownloadRecord } from '@/types/api'
+import { getStatus, getDownloads, getSystemTrend, getDownloadStatistics, getUploadStatistics, getSystemResources, type TrendPoint } from '@/api'
+import type { ServerStatus, DownloadRecord, SystemResources } from '@/types/api'
 import { formatDate, getStatusText, getStatusTagType } from '@/utils/formatters'
 
 const status = ref<ServerStatus | null>(null)
+const systemResources = ref<SystemResources | null>(null)
 const recentDownloads = ref<DownloadRecord[]>([])
 const chartRef = ref<HTMLElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
@@ -287,6 +365,17 @@ function fetchTrend() {
     .catch(console.error)
 }
 
+function fetchSystemResources() {
+  // 获取系统资源（实时更新）
+  getSystemResources()
+    .then(response => {
+      if (response.success && response.data) {
+        systemResources.value = response.data
+      }
+    })
+    .catch(err => console.error('获取系统资源失败:', err))
+}
+
 function fetchData() {
   // 获取状态
   getStatus()
@@ -333,7 +422,8 @@ function fetchData() {
           recentDownloads.value = allDownloads.slice(0, 10)
         } else {
           // 非分组数据
-          recentDownloads.value = (response.data as DownloadRecord[]) || []
+          const data = (response.data as DownloadRecord[]) || []
+          recentDownloads.value = data.slice(0, 10)
         }
       }
     })
@@ -381,8 +471,29 @@ function getLoadColor(load: number): string {
   return '#ef4444'
 }
 
+function getResourceTagType(percent: number): 'success' | 'warning' | 'danger' {
+  if (percent < 50) return 'success'
+  if (percent < 80) return 'warning'
+  return 'danger'
+}
+
+function getResourceColor(percent: number): string {
+  if (percent < 50) return '#10b981'
+  if (percent < 80) return '#f59e0b'
+  return '#ef4444'
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
 onMounted(() => {
   fetchData()
+  fetchSystemResources()
   nextTick(() => {
     initChart()
     fetchTrend()
@@ -390,6 +501,8 @@ onMounted(() => {
   
   // 每2秒更新图表
   const { pause: pauseTrend } = useIntervalFn(fetchTrend, 2000)
+  // 每2秒更新系统资源（实时显示）
+  const { pause: pauseResources } = useIntervalFn(fetchSystemResources, 2000)
   // 每30秒更新其他数据
   const { pause: pauseData } = useIntervalFn(fetchData, 30000)
   
@@ -399,6 +512,7 @@ onMounted(() => {
   
   onUnmounted(() => {
     pauseTrend()
+    pauseResources()
     pauseData()
     chartInstance?.dispose()
   })
@@ -525,14 +639,23 @@ onMounted(() => {
 
 .charts-row {
   @apply mb-8;
+  display: flex;
+  align-items: stretch;
+}
+
+.charts-row :deep(.el-col) {
+  display: flex;
 }
 
 .chart-card {
-  @apply h-80;
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(229, 231, 235, 0.8);
   transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 320px;
 }
 
 .chart-card:hover {
@@ -543,6 +666,42 @@ onMounted(() => {
 .chart-card :deep(.el-card__header) {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
   border-bottom: 1px solid rgba(229, 231, 235, 0.8);
+  padding: 20px 24px;
+  flex-shrink: 0;
+}
+
+.chart-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+}
+
+.system-load-card {
+  border-radius: 16px;
+  border: 1px solid rgba(229, 231, 235, 0.8);
+  transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 320px;
+}
+
+.system-load-card:hover {
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
+  border-color: rgba(102, 126, 234, 0.2);
+}
+
+.system-load-card :deep(.el-card__header) {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
+  border-bottom: 1px solid rgba(229, 231, 235, 0.8);
+  padding: 20px 24px;
+  flex-shrink: 0;
+}
+
+.system-load-card :deep(.el-card__body) {
+  flex: 1;
+  overflow: visible;
   padding: 20px 24px;
 }
 
@@ -555,39 +714,93 @@ onMounted(() => {
 }
 
 .chart-container {
-  @apply h-full w-full;
+  @apply w-full;
+  flex: 1;
   min-height: 250px;
 }
 
-.load-status {
-  @apply space-y-5;
-  padding: 4px 0;
+.system-resources {
+  @apply space-y-4;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.load-item {
-  @apply space-y-3;
-  padding: 16px;
+.resource-item {
+  @apply space-y-2;
+  padding: 12px 16px;
   border-radius: 12px;
   background: rgba(249, 250, 251, 0.5);
   transition: all 0.3s ease;
+  flex-shrink: 0;
 }
 
-.load-item:hover {
+.resource-item:hover {
   background: rgba(102, 126, 234, 0.05);
   transform: translateX(4px);
 }
 
-.load-header {
+.resource-header {
   @apply flex items-center justify-between;
 }
 
-.load-bot {
-  @apply font-semibold text-gray-800;
+.resource-label {
+  @apply flex items-center gap-2;
+  font-weight: 600;
+  color: #374151;
   font-size: 15px;
+}
+
+.resource-detail {
+  @apply text-xs text-gray-500;
+  margin-top: 4px;
+}
+
+.bot-loads {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(229, 231, 235, 0.8);
+}
+
+.bot-loads-title {
+  @apply font-semibold text-gray-700 mb-3;
+  font-size: 14px;
+}
+
+.bot-loads-list {
+  @apply space-y-3;
+}
+
+.bot-load-item {
+  @apply space-y-2;
+}
+
+.bot-load-header {
+  @apply flex items-center justify-between;
+}
+
+.bot-load-name {
+  @apply font-medium text-gray-700;
+  font-size: 13px;
 }
 
 .activity-row {
   @apply mt-8;
+  display: flex;
+  align-items: stretch;
+}
+
+.activity-row :deep(.el-col) {
+  display: flex;
+}
+
+.activity-card {
+  border-radius: 16px;
+  border: 1px solid rgba(229, 231, 235, 0.8);
+  transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 }
 
 .activity-row :deep(.el-card) {
@@ -601,9 +814,19 @@ onMounted(() => {
   border-color: rgba(102, 126, 234, 0.2);
 }
 
+.activity-card :deep(.el-card__header),
 .activity-row :deep(.el-card__header) {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
   border-bottom: 1px solid rgba(229, 231, 235, 0.8);
+  padding: 20px 24px;
+  flex-shrink: 0;
+}
+
+.activity-card :deep(.el-card__body),
+.activity-row :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   padding: 20px 24px;
 }
 
@@ -611,8 +834,19 @@ onMounted(() => {
   @apply text-lg font-semibold text-gray-800;
 }
 
+.system-info-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.system-descriptions {
+  flex-shrink: 0;
+}
+
 .activity-row :deep(.el-table) {
   border-radius: 8px;
+  flex: 1;
 }
 
 .activity-row :deep(.el-table__row) {

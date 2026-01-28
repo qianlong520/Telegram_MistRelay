@@ -10,6 +10,9 @@ import mimetypes
 import os
 import subprocess
 import json
+import asyncio
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine
@@ -17,8 +20,56 @@ from WebStreamer.bot import multi_clients, work_loads, channel_accessible_client
 from WebStreamer.server.exceptions import FIleNotFound, InvalidHash
 from WebStreamer.server.ws_manager import ws_manager
 from WebStreamer import Var, utils, StartTime, __version__, StreamBot
-from db import fetch_recent_downloads, get_all_configs, get_config, set_config
+from db import (
+    fetch_recent_downloads, get_all_configs, get_config, set_config,
+    get_download_id_by_gid, get_download_by_id, get_upload_by_id,
+    mark_download_failed, update_upload_status, mark_upload_failed,
+    delete_download_record
+)
 import configer
+
+# 导入全局 aria2 客户端
+# 优先直接从app模块获取（客户端在app.py启动时就已经初始化）
+# 如果app模块不可用，则从utils模块获取（通过set_aria2_client设置）
+def get_aria2_client():
+    """获取全局aria2客户端实例（优先从utils模块获取，然后从app模块）"""
+    # 首先尝试从utils模块获取（因为set_aria2_client会在启动时设置）
+    try:
+        from WebStreamer.bot.plugins.stream_modules.utils import aria2_client
+        if aria2_client is not None:
+            return aria2_client
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    
+    # 如果utils模块不可用，尝试从app模块直接获取
+    try:
+        import sys
+        import importlib
+        
+        # 尝试导入app模块（如果还没有导入）
+        if 'app' not in sys.modules:
+            try:
+                importlib.import_module('app')
+            except ImportError:
+                pass
+        
+        if 'app' in sys.modules:
+            app_module = sys.modules['app']
+            if hasattr(app_module, 'client') and app_module.client is not None:
+                return app_module.client
+        
+        # 如果sys.modules中没有，尝试直接导入
+        app_module = importlib.import_module('app')
+        if hasattr(app_module, 'client') and app_module.client is not None:
+            return app_module.client
+    except Exception:
+        pass
+    
+    # 如果都失败，记录错误
+    logger.error("无法获取Aria2客户端！请检查服务是否正常启动")
+    return None
 
 # 导入pyrogram错误类型以检测限流
 try:
@@ -33,6 +84,14 @@ try:
 except ImportError:
     DOCKER_AVAILABLE = False
     docker = None
+
+# psutil（用于系统资源监控）
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    psutil = None
 
 logger = logging.getLogger("routes")
 
@@ -434,6 +493,61 @@ async def docker_logs_handler(request: web.Request):
             })
     except Exception as e:
         logger.error(f"获取Docker日志失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@routes.get("/api/system/resources", allow_head=True)
+async def system_resources_handler(request: web.Request):
+    """获取系统资源使用情况（CPU、内存、硬盘）"""
+    try:
+        if not PSUTIL_AVAILABLE:
+            return web.json_response({
+                "success": False,
+                "error": "psutil不可用，请安装psutil包"
+            })
+        
+        # CPU使用率
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        
+        # 内存使用情况
+        memory = psutil.virtual_memory()
+        memory_percent = memory.percent
+        memory_total = memory.total
+        memory_used = memory.used
+        memory_available = memory.available
+        
+        # 硬盘使用情况（获取根目录所在分区）
+        disk = psutil.disk_usage('/')
+        disk_percent = disk.percent
+        disk_total = disk.total
+        disk_used = disk.used
+        disk_free = disk.free
+        
+        return web.json_response({
+            "success": True,
+            "data": {
+                "cpu": {
+                    "percent": round(cpu_percent, 2)
+                },
+                "memory": {
+                    "percent": round(memory_percent, 2),
+                    "total": memory_total,
+                    "used": memory_used,
+                    "available": memory_available
+                },
+                "disk": {
+                    "percent": round(disk_percent, 2),
+                    "total": disk_total,
+                    "used": disk_used,
+                    "free": disk_free
+                }
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取系统资源失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
             "error": str(e)
@@ -1048,6 +1162,456 @@ async def queue_api_handler(request: web.Request):
             })
     except Exception as e:
         logger.error(f"获取队列状态失败: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+# ==================== 下载任务控制 API ====================
+
+@routes.post("/api/downloads/{gid}/retry")
+async def retry_download_handler(request: web.Request):
+    """重试下载任务（重新提交到aria2）"""
+    try:
+        gid = request.match_info["gid"]
+        
+        client = get_aria2_client()
+        if not client:
+            logger.error("Aria2客户端未初始化，这不应该发生！请检查服务启动流程")
+            return web.json_response({
+                "success": False,
+                "error": "Aria2客户端未初始化，请检查服务是否正常启动"
+            }, status=503)
+        
+        # 获取下载记录
+        download_id = get_download_id_by_gid(gid)
+        if not download_id:
+            return web.json_response({
+                "success": False,
+                "error": "找不到下载记录"
+            }, status=404)
+        
+        download_record = get_download_by_id(download_id)
+        if not download_record:
+            return web.json_response({
+                "success": False,
+                "error": "下载记录不存在"
+            }, status=404)
+        
+        source_url = download_record.get('source_url')
+        if not source_url:
+            return web.json_response({
+                "success": False,
+                "error": "无法获取下载源URL，无法重试"
+            }, status=400)
+        
+        try:
+            # 尝试移除旧任务（如果还在aria2中）
+            try:
+                remove_result = await client.remove(gid)
+                # 检查返回结果中是否包含错误
+                if remove_result and isinstance(remove_result, dict) and 'error' in remove_result:
+                    error_info = remove_result['error']
+                    error_msg = error_info.get('message', '') if isinstance(error_info, dict) else str(error_info)
+                    # 如果错误是"not found"，这是正常的（历史遗留记录），静默处理
+                    if 'not found' in error_msg.lower():
+                        logger.debug(f"移除旧任务失败（任务已不存在，历史遗留记录）: {error_msg}")
+                    else:
+                        logger.debug(f"移除旧任务失败: {error_msg}")
+            except Exception as remove_err:
+                # 如果移除失败（任务可能已经不存在），继续执行
+                error_msg = str(remove_err)
+                if 'not found' not in error_msg.lower():
+                    logger.debug(f"移除旧任务失败（可能已不存在）: {remove_err}")
+            
+            # 重新提交到aria2
+            result = await client.add_uri(uris=[source_url])
+            
+            if not result or 'result' not in result:
+                return web.json_response({
+                    "success": False,
+                    "error": "重新提交到aria2失败"
+                }, status=500)
+            
+            new_gid = result.get('result')
+            
+            # 更新数据库中的 gid 和状态
+            from db import get_connection
+            now_iso = datetime.utcnow().isoformat(timespec="seconds") + 'Z'
+            with get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE downloads SET gid = ?, status = 'pending', error_message = NULL, retry_count = retry_count + 1, updated_at = ? WHERE id = ?",
+                    (new_gid, now_iso, download_id)
+                )
+                conn.commit()
+            
+            return web.json_response({
+                "success": True,
+                "message": f"任务已重新提交到aria2，新GID: {new_gid}",
+                "new_gid": new_gid
+            })
+        except Exception as e:
+            error_msg = str(e)
+            # 如果是Aria2任务不存在的错误，忽略它（历史遗留记录）
+            if 'not found' in error_msg.lower():
+                logger.info(f"重试下载任务时Aria2任务不存在（历史遗留记录）: {gid}")
+                # 即使任务不存在，也尝试重新提交
+                try:
+                    result = await client.add_uri(uris=[source_url])
+                    if result and 'result' in result:
+                        new_gid = result.get('result')
+                        # 更新数据库中的 gid 和状态
+                        from db import get_connection
+                        now_iso = datetime.utcnow().isoformat(timespec="seconds") + 'Z'
+                        with get_connection() as conn:
+                            conn.row_factory = sqlite3.Row
+                            cur = conn.cursor()
+                            cur.execute(
+                                "UPDATE downloads SET gid = ?, status = 'pending', error_message = NULL, retry_count = retry_count + 1, updated_at = ? WHERE id = ?",
+                                (new_gid, now_iso, download_id)
+                            )
+                            conn.commit()
+                        
+                        return web.json_response({
+                            "success": True,
+                            "message": f"任务已重新提交到aria2（旧任务不存在，已跳过），新GID: {new_gid}",
+                            "new_gid": new_gid
+                        })
+                except Exception as retry_err:
+                    logger.error(f"重新提交任务失败: {retry_err}", exc_info=True)
+            
+            logger.error(f"重试下载任务失败: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": error_msg
+            }, status=500)
+    except Exception as e:
+        logger.error(f"重试下载任务API错误: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.delete("/api/downloads/{gid}")
+async def delete_download_handler(request: web.Request):
+    """删除下载任务（从aria2移除，并删除数据库记录）"""
+    try:
+        gid = request.match_info["gid"]
+        
+        # 先尝试从Aria2移除任务
+        client = get_aria2_client()
+        aria2_removed = False
+        if client:
+            try:
+                result = await client.remove(gid)
+                if 'error' not in result:
+                    aria2_removed = True
+                else:
+                    error_info = result['error']
+                    error_msg = error_info.get('message', '删除失败') if isinstance(error_info, dict) else str(error_info)
+                    # 如果任务不存在（Aria2重启后任务会消失），这是正常的，继续删除数据库记录
+                    error_msg_lower = error_msg.lower()
+                    if any(keyword in error_msg_lower for keyword in ['not found', 'is not found', '不存在', '找不到']):
+                        logger.info(f"Aria2任务 {gid} 不存在（Aria2重启后任务已消失），将删除数据库记录")
+                    else:
+                        # 其他错误，记录但不阻止删除数据库记录
+                        logger.warning(f"从Aria2移除任务失败: {error_msg}，将继续删除数据库记录")
+            except Exception as e:
+                error_msg = str(e)
+                error_msg_lower = error_msg.lower()
+                # 如果任务不存在（Aria2重启后任务会消失），这是正常的，继续删除数据库记录
+                if any(keyword in error_msg_lower for keyword in ['not found', 'is not found', '不存在', '找不到']):
+                    logger.info(f"Aria2任务 {gid} 不存在（Aria2重启后任务已消失），将删除数据库记录")
+                else:
+                    logger.warning(f"从Aria2移除任务失败: {error_msg}，将继续删除数据库记录")
+        else:
+            logger.warning("Aria2客户端未初始化，将直接删除数据库记录")
+        
+        # 无论Aria2任务是否存在，都删除数据库中的下载记录
+        download_id = get_download_id_by_gid(gid)
+        if download_id:
+            try:
+                result = delete_download_record(download_id, delete_local_file=False)  # 不删除本地文件，只删除记录
+                if result.get('success'):
+                    message = f"任务 {gid} 已删除"
+                    if aria2_removed:
+                        message += "（Aria2任务和数据库记录已删除）"
+                    else:
+                        message += "（Aria2任务不存在，已删除数据库记录）"
+                    return web.json_response({
+                        "success": True,
+                        "message": message,
+                        "data": result
+                    })
+                else:
+                    return web.json_response({
+                        "success": False,
+                        "error": result.get('error', '删除数据库记录失败')
+                    }, status=400)
+            except Exception as e:
+                logger.error(f"删除数据库记录失败: {e}", exc_info=True)
+                return web.json_response({
+                    "success": False,
+                    "error": f"删除数据库记录失败: {str(e)}"
+                }, status=500)
+        else:
+            # 数据库中没有记录，只返回成功（Aria2任务可能已经不存在）
+            if aria2_removed:
+                return web.json_response({
+                    "success": True,
+                    "message": f"任务 {gid} 已从Aria2删除（数据库中没有记录）"
+                })
+            else:
+                return web.json_response({
+                    "success": True,
+                    "message": f"任务 {gid} 不存在（Aria2和数据库中都没有记录）"
+                })
+    except Exception as e:
+        logger.error(f"删除下载任务API错误: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.delete("/api/downloads/record/{download_id}")
+async def delete_download_record_handler(request: web.Request):
+    """删除下载记录（从数据库删除记录和本地文件）"""
+    try:
+        download_id = int(request.match_info["download_id"])
+        
+        # 获取是否删除本地文件的参数（默认为true）
+        delete_file = request.query.get("delete_file", "true").lower() == "true"
+        
+        try:
+            result = delete_download_record(download_id, delete_local_file=delete_file)
+            if result.get('success'):
+                return web.json_response({
+                    "success": True,
+                    "message": f"下载记录 {download_id} 已删除",
+                    "data": result
+                })
+            else:
+                # 如果删除失败，返回错误信息
+                error_msg = result.get('error', '删除失败')
+                # 如果是Aria2任务不存在的错误，忽略它（历史遗留记录）
+                if 'not found' in error_msg.lower():
+                    # 即使Aria2任务不存在，也认为删除成功（因为记录已删除）
+                    return web.json_response({
+                        "success": True,
+                        "message": f"下载记录 {download_id} 已删除（Aria2任务不存在，已跳过）",
+                        "data": result
+                    })
+                return web.json_response({
+                    "success": False,
+                    "error": error_msg
+                }, status=400)
+        except Exception as e:
+            error_msg = str(e)
+            # 如果是Aria2任务不存在的错误，忽略它（历史遗留记录）
+            if 'not found' in error_msg.lower() or 'GID' in error_msg:
+                logger.info(f"删除下载记录时出现Aria2相关错误（历史遗留记录）: {download_id}, 错误: {error_msg}")
+                # 尝试直接删除记录（不尝试移除Aria2任务）
+                try:
+                    result = delete_download_record(download_id, delete_local_file=delete_file)
+                    if result.get('success'):
+                        return web.json_response({
+                            "success": True,
+                            "message": f"下载记录 {download_id} 已删除（Aria2任务不存在，已跳过）",
+                            "data": result
+                        })
+                    else:
+                        # 如果删除记录也失败，返回记录删除的错误
+                        return web.json_response({
+                            "success": False,
+                            "error": result.get('error', '删除记录失败')
+                        }, status=400)
+                except Exception as retry_err:
+                    logger.error(f"重新尝试删除记录失败: {retry_err}", exc_info=True)
+                    # 如果重新尝试也失败，返回原始错误
+                    return web.json_response({
+                        "success": False,
+                        "error": f"删除记录失败: {str(retry_err)}"
+                    }, status=500)
+            logger.error(f"删除下载记录失败: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": error_msg
+            }, status=500)
+    except ValueError:
+        return web.json_response({
+            "success": False,
+            "error": "无效的下载记录ID"
+        }, status=400)
+    except Exception as e:
+        logger.error(f"删除下载记录API错误: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+# ==================== 上传任务控制 API ====================
+
+# 存储正在运行的上传任务进程（用于暂停/取消）
+_upload_processes = {}
+_upload_processes_lock = asyncio.Lock() if asyncio else None
+
+@routes.post("/api/uploads/{upload_id}/retry")
+async def retry_upload_handler(request: web.Request):
+    """重试上传任务（重新提交rclone上传）"""
+    try:
+        upload_id = int(request.match_info["upload_id"])
+        
+        upload_record = get_upload_by_id(upload_id)
+        if not upload_record:
+            return web.json_response({
+                "success": False,
+                "error": "上传记录不存在"
+            }, status=404)
+        
+        current_status = upload_record.get('status')
+        # 允许所有状态重试，但已完成且已清理的任务可能需要特殊处理
+        if current_status == 'completed' and upload_record.get('cleaned_at'):
+            # 如果已完成且已清理，检查文件是否存在
+            pass  # 继续检查文件是否存在
+        
+        download_id = upload_record.get('download_id')
+        download_record = get_download_by_id(download_id) if download_id else None
+        
+        if not download_record:
+            return web.json_response({
+                "success": False,
+                "error": "关联的下载记录不存在"
+            }, status=404)
+        
+        local_path = download_record.get('local_path')
+        if not local_path or not os.path.exists(local_path):
+            return web.json_response({
+                "success": False,
+                "error": "本地文件不存在，无法重试上传"
+            }, status=404)
+        
+        upload_target = upload_record.get('upload_target')
+        gid = download_record.get('gid')
+        
+        # 重置重试计数和状态
+        update_upload_status(
+            upload_id, 
+            'pending',
+            retry_count=0,
+            error_message=None,
+            error_code=None,
+            failure_reason=None
+        )
+        
+        # 根据上传目标选择重试方式
+        try:
+            if upload_target in ['onedrive', 'gdrive']:
+                # OneDrive/Google Drive: 直接重新提交rclone上传
+                from aria2_client.upload_handler import UploadHandler
+                
+                upload_handler = UploadHandler(None, {})
+                
+                if upload_target == 'onedrive':
+                    asyncio.create_task(
+                        upload_handler.upload_to_onedrive(local_path, None, gid, upload_id=upload_id)
+                    )
+                elif upload_target == 'gdrive':
+                    asyncio.create_task(
+                        upload_handler.upload_to_google_drive(local_path, None, gid, upload_id=upload_id)
+                    )
+                
+                return web.json_response({
+                    "success": True,
+                    "message": f"上传任务 {upload_id} 已重新提交rclone上传"
+                })
+            elif upload_target == 'telegram':
+                # Telegram: 使用上传处理器
+                from aria2_client.upload_handler import UploadHandler
+                
+                upload_handler = UploadHandler(None, {})
+                asyncio.create_task(
+                    upload_handler.upload_to_telegram_with_load_balance(local_path, gid, upload_id=upload_id)
+                )
+                
+                return web.json_response({
+                    "success": True,
+                    "message": f"上传任务 {upload_id} 已重新提交Telegram上传"
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": f"不支持的上传目标: {upload_target}"
+                }, status=400)
+        except Exception as e:
+            logger.error(f"重试上传任务失败: {e}", exc_info=True)
+            mark_upload_failed(upload_id, 'code_error', str(e), 'EXCEPTION')
+            return web.json_response({
+                "success": False,
+                "error": f"重试上传失败: {str(e)}"
+            }, status=500)
+    except ValueError:
+        return web.json_response({
+            "success": False,
+            "error": "无效的上传ID"
+        }, status=400)
+    except Exception as e:
+        logger.error(f"重试上传任务API错误: {e}", exc_info=True)
+        return web.json_response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@routes.delete("/api/uploads/{upload_id}")
+async def delete_upload_handler(request: web.Request):
+    """删除/取消上传任务"""
+    try:
+        upload_id = int(request.match_info["upload_id"])
+        
+        upload_record = get_upload_by_id(upload_id)
+        if not upload_record:
+            return web.json_response({
+                "success": False,
+                "error": "上传记录不存在"
+            }, status=404)
+        
+        current_status = upload_record.get('status')
+        
+        # 如果正在上传，先停止进程
+        if current_status == 'uploading':
+            if _upload_processes_lock:
+                async with _upload_processes_lock:
+                    if upload_id in _upload_processes:
+                        process = _upload_processes[upload_id]
+                        try:
+                            if process and process.returncode is None:
+                                process.terminate()
+                                await asyncio.wait_for(process.wait(), timeout=5)
+                        except Exception as e:
+                            logger.warning(f"停止上传进程失败: {e}")
+                        finally:
+                            del _upload_processes[upload_id]
+        
+        # 更新状态为 cancelled
+        update_upload_status(upload_id, 'cancelled')
+        
+        return web.json_response({
+            "success": True,
+            "message": f"上传任务 {upload_id} 已取消"
+        })
+    except ValueError:
+        return web.json_response({
+            "success": False,
+            "error": "无效的上传ID"
+        }, status=400)
+    except Exception as e:
+        logger.error(f"删除上传任务API错误: {e}", exc_info=True)
         return web.json_response({
             "success": False,
             "error": str(e)

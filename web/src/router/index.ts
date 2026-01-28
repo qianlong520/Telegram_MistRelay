@@ -22,11 +22,6 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/tasks.vue')
   },
   {
-    path: '/status',
-    name: 'Status',
-    component: () => import('@/views/status.vue')
-  },
-  {
     path: '/settings',
     name: 'Settings',
     component: () => import('@/views/settings.vue')

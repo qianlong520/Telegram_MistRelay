@@ -36,11 +36,6 @@
         <template #title>任务队列</template>
       </el-menu-item>
       
-      <el-menu-item index="/status" class="menu-item">
-        <el-icon><Monitor /></el-icon>
-        <template #title>系统状态</template>
-      </el-menu-item>
-      
       <el-menu-item index="/settings" class="menu-item">
         <el-icon><Setting /></el-icon>
         <template #title>系统设置</template>
@@ -72,7 +67,6 @@ import {
   Odometer,
   Download,
   List,
-  Monitor,
   Setting,
   Tools,
   Expand,
