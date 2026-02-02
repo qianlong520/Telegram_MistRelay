@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 import aiohttp
 import websockets
 
-from configer import RPC_URL, RPC_SECRET
+from configer import get_config_value
 
 from .download_handler import DownloadHandler
 from .upload_handler import UploadHandler
@@ -199,8 +199,10 @@ class AsyncAria2Client:
         Returns:
             dict: RPC响应
         """
+        # 动态从数据库读取RPC_URL配置
+        rpc_url = get_config_value('RPC_URL', 'localhost:6800/jsonrpc')
         # 从RPC_URL中提取主机和端口
-        url_parts = RPC_URL.split('/')
+        url_parts = rpc_url.split('/')
         host_port = url_parts[0]
         path = '/'.join(url_parts[1:])
         

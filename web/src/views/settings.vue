@@ -1,12 +1,15 @@
 <template>
-  <div class="settings-page" v-loading="reloading" element-loading-text="正在重新加载配置，请稍候..." element-loading-background="rgba(0, 0, 0, 0.7)">
+  <div class="settings-page">
     <div class="page-header">
       <el-button type="info" @click="handleReloadConfig" :loading="reloading" :disabled="reloading">
-        重新加载配置
+        从config.yml重新导入配置
       </el-button>
+      <div style="margin-left: 10px; color: #909399; font-size: 12px;">
+        提示：配置保存后会自动从数据库读取，无需手动重载
+      </div>
     </div>
 
-    <el-tabs v-model="activeTab" type="border-card" :disabled="reloading">
+    <el-tabs v-model="activeTab" type="border-card">
       <!-- Telegram配置 -->
       <el-tab-pane label="Telegram配置" name="telegram">
         <el-card shadow="hover">
@@ -18,6 +21,18 @@
               </el-button>
             </div>
           </template>
+          <el-alert
+            type="warning"
+            :closable="false"
+            style="margin-bottom: 20px"
+          >
+            <template #title>
+              <div style="font-size: 13px">
+                <strong>注意：</strong>修改 API ID、API Hash、Bot Token 或管理员ID 后需要重启服务才能生效。
+                <br />其他配置（如上传到Telegram）保存后会在下次使用时自动从数据库读取最新配置。
+              </div>
+            </template>
+          </el-alert>
           <el-form :model="configs.telegram" label-width="180px" :rules="rules" :disabled="reloading">
             <el-form-item label="API ID" prop="API_ID">
               <el-input-number v-model="configs.telegram.API_ID" :min="0" style="width: 100%" />
@@ -52,6 +67,17 @@
               </el-button>
             </div>
           </template>
+          <el-alert
+            type="info"
+            :closable="false"
+            style="margin-bottom: 20px"
+          >
+            <template #title>
+              <div style="font-size: 13px">
+                <strong>提示：</strong>Rclone配置保存后会立即生效，下次上传时会自动从数据库读取最新配置，无需重启服务。
+              </div>
+            </template>
+          </el-alert>
           <el-form :model="configs.rclone" label-width="180px">
             <el-divider content-position="left">OneDrive配置</el-divider>
             <el-form-item label="启用OneDrive上传">
@@ -107,11 +133,22 @@
           <template #header>
             <div class="card-header">
               <span>下载设置</span>
-              <el-button type="primary" @click="saveConfig('download')" :loading="saving" :disabled="reloading">
+              <el-button type="primary" @click="saveConfig('download')" :loading="saving">
                 保存配置
               </el-button>
             </div>
           </template>
+          <el-alert
+            type="info"
+            :closable="false"
+            style="margin-bottom: 20px"
+          >
+            <template #title>
+              <div style="font-size: 13px">
+                <strong>提示：</strong>下载配置保存后会立即生效，下次下载时会自动从数据库读取最新配置，无需重启服务。
+              </div>
+            </template>
+          </el-alert>
           <el-form :model="configs.download" label-width="180px" :disabled="reloading">
             <el-form-item label="保存路径">
               <el-input v-model="configs.download.SAVE_PATH" />
@@ -153,11 +190,22 @@
           <template #header>
             <div class="card-header">
               <span>Aria2 RPC配置</span>
-              <el-button type="primary" @click="saveConfig('aria2')" :loading="saving" :disabled="reloading">
+              <el-button type="primary" @click="saveConfig('aria2')" :loading="saving">
                 保存配置
               </el-button>
             </div>
           </template>
+          <el-alert
+            type="info"
+            :closable="false"
+            style="margin-bottom: 20px"
+          >
+            <template #title>
+              <div style="font-size: 13px">
+                <strong>提示：</strong>Aria2配置保存后会立即生效，下次连接时会自动从数据库读取最新配置，无需重启服务。
+              </div>
+            </template>
+          </el-alert>
           <el-form :model="configs.aria2" label-width="180px">
             <el-form-item label="RPC密钥">
               <el-input v-model="configs.aria2.RPC_SECRET" type="password" show-password />
@@ -180,7 +228,7 @@
               </el-button>
             </div>
           </template>
-          <el-form :model="configs.stream" label-width="180px" :disabled="reloading">
+          <el-form :model="configs.stream" label-width="180px">
             <el-form-item label="启用直链功能">
               <el-switch v-model="configs.stream.ENABLE_STREAM" />
             </el-form-item>
@@ -370,7 +418,7 @@ async function saveConfig(category: string) {
           duration: 5000
         })
       } else {
-        ElMessage.success(response.message || '配置已保存并热重载')
+        ElMessage.success(response.message || '配置已保存，下次使用时将从数据库读取最新配置')
       }
       // 重新获取配置以确保同步
       await fetchConfigs()
@@ -388,8 +436,8 @@ async function saveConfig(category: string) {
 async function handleReloadConfig() {
   try {
     await ElMessageBox.confirm(
-      '确定要重新加载配置吗？这将会从数据库重新读取所有配置。',
-      '确认重载配置',
+      '确定要从config.yml重新导入配置到数据库吗？这将会覆盖数据库中的现有配置。',
+      '确认导入配置',
       {
         confirmButtonText: '确定',
         cancelButtonText: '取消',
@@ -403,15 +451,15 @@ async function handleReloadConfig() {
     try {
       const response = await reloadConfig()
       if (response.success) {
-        ElMessage.success('配置已重新加载')
+        ElMessage.success(response.message || '配置已从config.yml重新导入到数据库')
         // 重新获取配置
         await fetchConfigs()
       } else {
-        ElMessage.error(response.error || '配置重载失败')
+        ElMessage.error(response.error || '配置导入失败')
       }
     } catch (err: any) {
-      console.error('重载配置失败:', err)
-      ElMessage.error(err.message || '配置重载失败')
+      console.error('导入配置失败:', err)
+      ElMessage.error(err.message || '配置导入失败')
     } finally {
       // 重载完成，解锁页面
       reloading.value = false

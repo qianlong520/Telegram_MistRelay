@@ -95,32 +95,29 @@ async def wait_for_tasks_completion(task_gids: list):
                                     completed_gids.add(gid)
                                 # 如果状态是uploaded（已上传），检查是否需要等待清理
                                 elif status == 'uploaded':
-                                    # 检查配置（需要从configer导入）
+                                    # 动态获取配置（从数据库读取）
                                     try:
-                                        from configer import AUTO_DELETE_AFTER_UPLOAD
+                                        from configer import get_config_value
+                                        auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
                                         # 如果AUTO_DELETE_AFTER_UPLOAD为False，上传完成即视为完成
-                                        if not AUTO_DELETE_AFTER_UPLOAD:
+                                        if not auto_delete:
                                             completed_gids.add(gid)
                                         # 如果AUTO_DELETE_AFTER_UPLOAD为True，需要等待清理（状态变为cleaned）
-                                    except ImportError:
-                                        # 如果无法导入配置，检查是否有上传配置（UP_ONEDRIVE或UP_TELEGRAM）
-                                        try:
-                                            from configer import UP_ONEDRIVE, UP_TELEGRAM
-                                            # 如果没有启用上传，下载完成即视为完成
-                                            if not UP_ONEDRIVE and not UP_TELEGRAM:
-                                                completed_gids.add(gid)
-                                        except ImportError:
-                                            # 如果无法导入配置，假设需要等待清理
-                                            pass
+                                    except Exception:
+                                        # 如果无法获取配置，假设需要等待清理
+                                        pass
                                 # 如果状态是completed（仅下载完成），检查是否启用了上传
                                 elif status == 'completed':
+                                    # 动态获取配置（从数据库读取）
                                     try:
-                                        from configer import UP_ONEDRIVE, UP_TELEGRAM
+                                        from configer import get_config_value
+                                        up_onedrive = get_config_value('UP_ONEDRIVE', False)
+                                        up_telegram = get_config_value('UP_TELEGRAM', False)
                                         # 如果没有启用上传，下载完成即视为完成
-                                        if not UP_ONEDRIVE and not UP_TELEGRAM:
+                                        if not up_onedrive and not up_telegram:
                                             completed_gids.add(gid)
-                                    except ImportError:
-                                        # 如果无法导入配置，假设需要等待上传
+                                    except Exception:
+                                        # 如果无法获取配置，假设需要等待上传
                                         pass
                         elif aria2_task_status in ['error', 'removed']:
                             # 任务失败或被移除，标记为完成（不再等待）

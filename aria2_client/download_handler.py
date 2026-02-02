@@ -6,7 +6,7 @@ import os
 import time
 from typing import Optional
 
-from configer import ADMIN_ID, UP_TELEGRAM, UP_ONEDRIVE, UP_GOOGLE_DRIVE, FORWARD_ID, AUTO_DELETE_AFTER_UPLOAD, GOOGLE_DRIVE_REMOTE, GOOGLE_DRIVE_PATH
+# 配置在运行时通过 get_config_value() 动态读取，无需静态导入
 from util import get_file_name, byte2_readable, hum_convert, progress
 from db import (
     mark_download_completed, mark_download_failed, mark_download_paused,

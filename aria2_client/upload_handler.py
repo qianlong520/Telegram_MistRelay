@@ -7,10 +7,7 @@ import os
 import subprocess
 from typing import Optional
 
-from configer import (
-    ADMIN_ID, RCLONE_REMOTE, RCLONE_PATH, AUTO_DELETE_AFTER_UPLOAD, FORWARD_ID,
-    GOOGLE_DRIVE_REMOTE, GOOGLE_DRIVE_PATH
-)
+from configer import get_config_value
 from util import byte2_readable, progress as util_progress
 from db import (
     mark_upload_started, mark_upload_completed, mark_upload_failed,
@@ -233,11 +230,15 @@ class UploadHandler:
                 print(f"文件不存在，无法上传到 OneDrive: {file_name}")
                 return False
                 
-            # 构建rclone命令
+            # 构建rclone命令（动态获取配置）
             if use_google_drive:
-                remote_path = f"{GOOGLE_DRIVE_REMOTE}:{GOOGLE_DRIVE_PATH}"
+                gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                remote_path = f"{gdrive_remote}:{gdrive_path}"
             else:
-                remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}"
+                rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
+                remote_path = f"{rclone_remote}:{rclone_path}"
             command = [
                 "rclone", 
                 "copy", 
@@ -459,12 +460,16 @@ class UploadHandler:
                         
                         # 静默处理：不再发送Telegram消息，校验重试信息通过WebSocket推送
                         
-                        # 删除远程文件
+                        # 删除远程文件（动态获取配置）
                         try:
                             if use_google_drive:
-                                remote_file = f"{GOOGLE_DRIVE_REMOTE}:{GOOGLE_DRIVE_PATH}/{file_name}"
+                                gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                                gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                                remote_file = f"{gdrive_remote}:{gdrive_path}/{file_name}"
                             else:
-                                remote_file = f"{RCLONE_REMOTE}:{RCLONE_PATH}/{file_name}"
+                                rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                                rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
+                                remote_file = f"{rclone_remote}:{rclone_path}/{file_name}"
                             print(f"[重试] 删除远程文件: {remote_file}")
                             from .utils import run_rclone_command_async
                             returncode, stdout, stderr = await run_rclone_command_async(
@@ -481,12 +486,16 @@ class UploadHandler:
                         # 等待一段时间再重试
                         await asyncio.sleep(5)
                         
-                        # 重新上传
+                        # 重新上传（动态获取配置）
                         print(f"[重试] 开始重新上传...")
                         if use_google_drive:
-                            remote_path = f"{GOOGLE_DRIVE_REMOTE}:{GOOGLE_DRIVE_PATH}"
+                            gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                            gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                            remote_path = f"{gdrive_remote}:{gdrive_path}"
                         else:
-                            remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}"
+                            rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                            rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
+                            remote_path = f"{rclone_remote}:{rclone_path}"
                         command = [
                             "rclone", 
                             "copy", 
@@ -524,11 +533,15 @@ class UploadHandler:
                             verify_msg = f"重新上传出错: {upload_e}"
                             continue
                     
-                    # 执行校验
+                    # 执行校验（动态获取配置）
                     if use_google_drive:
-                        verify_remote_path = f"{GOOGLE_DRIVE_REMOTE}:{GOOGLE_DRIVE_PATH}/{file_name}"
+                        gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                        gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                        verify_remote_path = f"{gdrive_remote}:{gdrive_path}/{file_name}"
                     else:
-                        verify_remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}/{file_name}"
+                        rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                        rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
+                        verify_remote_path = f"{rclone_remote}:{rclone_path}/{file_name}"
                     verify_success, verify_msg = await self.verify_onedrive_upload(
                         file_path, 
                         verify_remote_path,
@@ -565,12 +578,16 @@ class UploadHandler:
             if upload_success:
                 if upload_id:
                     try:
-                        # 构建完整的远程路径（包含文件名）
+                        # 构建完整的远程路径（包含文件名，动态获取配置）
                         file_name = os.path.basename(file_path)
                         if use_google_drive:
-                            full_remote_path = f"{GOOGLE_DRIVE_REMOTE}:{GOOGLE_DRIVE_PATH}/{file_name}"
+                            gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
+                            gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
+                            full_remote_path = f"{gdrive_remote}:{gdrive_path}/{file_name}"
                         else:
-                            full_remote_path = f"{RCLONE_REMOTE}:{RCLONE_PATH}/{file_name}"
+                            rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
+                            rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
+                            full_remote_path = f"{rclone_remote}:{rclone_path}/{file_name}"
                         mark_upload_completed(upload_id, remote_path=full_remote_path)
                     except Exception as e:
                         print(f"标记上传完成出错: {e}")
@@ -595,8 +612,9 @@ class UploadHandler:
                     except Exception as e:
                         print(f"更新任务上传状态失败: {e}")
                 
-                # 上传成功后删除本地文件
-                if AUTO_DELETE_AFTER_UPLOAD:
+                # 上传成功后删除本地文件（动态获取配置）
+                auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
+                if auto_delete:
                     try:
                         os.unlink(file_path)
                         print(f"已删除本地文件: {file_path}")
@@ -816,18 +834,21 @@ class UploadHandler:
             # 根据文件类型上传
             try:
                 if file_path.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                    # 图片文件
+                    # 图片文件（动态获取配置）
+                    admin_id = get_config_value('ADMIN_ID', 0)
+                    forward_id = get_config_value('FORWARD_ID', None)
+                    
                     if hasattr(upload_client, 'send_file'):  # Telethon
                         partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path, upload_id=upload_id)
-                        temp_msg = await upload_client.send_file(ADMIN_ID, file_path, progress_callback=partial_callback)
+                        temp_msg = await upload_client.send_file(admin_id, file_path, progress_callback=partial_callback)
                     else:  # Pyrogram
-                        temp_msg = await upload_client.send_photo(ADMIN_ID, file_path)
+                        temp_msg = await upload_client.send_photo(admin_id, file_path)
                     
-                    if FORWARD_ID:
+                    if forward_id:
                         if hasattr(temp_msg, 'forward_to'):  # Telethon
-                            await temp_msg.forward_to(int(FORWARD_ID))
+                            await temp_msg.forward_to(int(forward_id))
                         else:  # Pyrogram
-                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                            await upload_client.forward_messages(int(forward_id), admin_id, temp_msg.id)
                     
                     # 静默处理：不再发送Telegram消息，因此无需删除
                     # 更新任务完成跟踪状态为 'uploaded'（Telegram上传）
@@ -846,8 +867,9 @@ class UploadHandler:
                         except Exception as e:
                             print(f"更新任务上传状态失败: {e}")
                     
-                    # 图片上传后不需要清理（图片通常不删除），但如果启用了AUTO_DELETE_AFTER_UPLOAD，也需要清理
-                    if AUTO_DELETE_AFTER_UPLOAD and os.path.exists(file_path):
+                    # 图片上传后不需要清理（图片通常不删除），但如果启用了AUTO_DELETE_AFTER_UPLOAD，也需要清理（动态获取配置）
+                    auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
+                    if auto_delete and os.path.exists(file_path):
                         try:
                             os.unlink(file_path)
                             
@@ -890,19 +912,22 @@ class UploadHandler:
                     if hasattr(upload_client, 'send_file'):  # Telethon
                         partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path, upload_id=upload_id)
                         temp_msg = await upload_client.send_file(
-                            ADMIN_ID, 
+                            get_config_value('ADMIN_ID', 0),
                             file_path, 
                             thumb=thumb_path,
                             progress_callback=partial_callback
                         )
                     else:  # Pyrogram
-                        temp_msg = await upload_client.send_video(ADMIN_ID, file_path, thumb=thumb_path)
+                        admin_id = get_config_value('ADMIN_ID', 0)
+                        temp_msg = await upload_client.send_video(admin_id, file_path, thumb=thumb_path)
                     
-                    if FORWARD_ID:
+                    forward_id = get_config_value('FORWARD_ID', None)
+                    if forward_id:
                         if hasattr(temp_msg, 'forward_to'):  # Telethon
-                            await temp_msg.forward_to(int(FORWARD_ID))
+                            await temp_msg.forward_to(int(forward_id))
                         else:  # Pyrogram
-                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                            admin_id = get_config_value('ADMIN_ID', 0)
+                            await upload_client.forward_messages(int(forward_id), admin_id, temp_msg.id)
                     
                     # 静默处理：不再发送Telegram消息，因此无需删除
                     # 更新任务完成跟踪状态为 'uploaded'（Telegram上传）
@@ -925,7 +950,9 @@ class UploadHandler:
                     if os.path.exists(thumb_path):
                         os.unlink(thumb_path)
                     
-                    if AUTO_DELETE_AFTER_UPLOAD:
+                    # 动态获取配置
+                    auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
+                    if auto_delete:
                         os.unlink(file_path)
                         
                         # 更新数据库中的清理状态
@@ -953,23 +980,28 @@ class UploadHandler:
                             except Exception as e:
                                 print(f"更新任务清理状态失败: {e}")
                 else:
-                    # 其他文件类型
+                    # 其他文件类型（动态获取配置）
+                    admin_id = get_config_value('ADMIN_ID', 0)
+                    forward_id = get_config_value('FORWARD_ID', None)
+                    
                     if hasattr(upload_client, 'send_file'):  # Telethon
                         partial_callback = functools.partial(self.callback, gid=gid, msg=msg, path=file_path, upload_id=upload_id)
-                        temp_msg = await upload_client.send_file(ADMIN_ID, file_path, progress_callback=partial_callback)
+                        temp_msg = await upload_client.send_file(admin_id, file_path, progress_callback=partial_callback)
                     else:  # Pyrogram
-                        temp_msg = await upload_client.send_document(ADMIN_ID, file_path)
+                        temp_msg = await upload_client.send_document(admin_id, file_path)
                     
-                    if FORWARD_ID:
+                    if forward_id:
                         if hasattr(temp_msg, 'forward_to'):  # Telethon
-                            await temp_msg.forward_to(int(FORWARD_ID))
+                            await temp_msg.forward_to(int(forward_id))
                         else:  # Pyrogram
-                            await upload_client.forward_messages(int(FORWARD_ID), ADMIN_ID, temp_msg.id)
+                            await upload_client.forward_messages(int(forward_id), admin_id, temp_msg.id)
                     
                     if hasattr(msg, 'delete'):
                         await msg.delete()
                     
-                    if AUTO_DELETE_AFTER_UPLOAD:
+                    # 动态获取配置
+                    auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
+                    if auto_delete:
                         os.unlink(file_path)
                         
                         # 更新数据库中的清理状态

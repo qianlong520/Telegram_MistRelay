@@ -869,17 +869,13 @@ async def update_config_handler(request: web.Request):
                 "needs_restart": needs_restart
             }, status=400)
         
-        # 尝试热重载配置（对于不需要重启的配置）
-        if not needs_restart:
-            try:
-                configer.reload_config()
-                logger.info("配置已热重载")
-            except Exception as e:
-                logger.warning(f"配置热重载失败: {e}")
+        # 配置已保存到数据库，下次使用时将从数据库读取
+        # 对于需要重启的配置，提示用户重启服务
+        # 对于不需要重启的配置，下次使用时自动从数据库读取最新值
         
         return web.json_response({
             "success": True,
-            "message": f"成功更新 {updated_count} 个配置项" + ("，需要重启服务才能生效" if needs_restart else "，配置已热重载"),
+            "message": f"成功更新 {updated_count} 个配置项" + ("，需要重启服务才能生效" if needs_restart else "，下次使用时将从数据库读取最新配置"),
             "updated_count": updated_count,
             "needs_restart": needs_restart
         })
@@ -896,14 +892,12 @@ async def reload_config_handler(request: web.Request):
     """手动触发配置重载（从config.yml重新导入到数据库）"""
     try:
         from db import init_config_from_yaml
-        # 先从config.yml重新导入到数据库
+        # 从config.yml重新导入到数据库
         imported = init_config_from_yaml()
-        # 然后重新加载配置缓存
-        configer.reload_config()
-        logger.info("配置已手动重载（从config.yml导入）")
+        logger.info("配置已从config.yml重新导入到数据库")
         return web.json_response({
             "success": True,
-            "message": "配置已从config.yml重新导入并加载",
+            "message": "配置已从config.yml重新导入到数据库，下次使用时将从数据库读取最新配置",
             "imported": imported
         })
     except Exception as e:
