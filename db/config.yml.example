@@ -63,6 +63,8 @@ STREAM_USE_SESSION_FILE: false
 STREAM_ALLOWED_USERS: 
 # 是否自动将直链添加到aria2下载队列(默认启用,仅管理员)
 STREAM_AUTO_DOWNLOAD: true
+# 是否只使用 TG 网盘（开启后仅转发到频道，不走 aria2 下载和后续上传）
+STREAM_TG_DISK_ONLY: false
 # 是否发送直链信息给用户(默认不启用,设置为 true 后才会发送直链信息给用户,关闭后仍会生成直链并添加到下载队列)
 SEND_STREAM_LINK: false 
 # 是否跳过小于指定大小的媒体文件(默认false)

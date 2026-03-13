@@ -398,6 +398,12 @@
             <el-form-item label="自动添加到下载队列">
               <el-switch v-model="configs.stream.STREAM_AUTO_DOWNLOAD" />
             </el-form-item>
+            <el-form-item label="只使用TG网盘">
+              <el-switch v-model="configs.stream.STREAM_TG_DISK_ONLY" />
+              <div class="el-form-item__help">
+                开启后仅转发媒体到 TG 网盘频道，不再走服务端 aria2 下载和后续上传链路
+              </div>
+            </el-form-item>
             <el-form-item label="发送直链信息给用户">
               <el-switch v-model="configs.stream.SEND_STREAM_LINK" />
             </el-form-item>
@@ -507,6 +513,7 @@ const configs = ref({
     STREAM_USE_SESSION_FILE: false,
     STREAM_ALLOWED_USERS: '',
     STREAM_AUTO_DOWNLOAD: true,
+    STREAM_TG_DISK_ONLY: false,
     SEND_STREAM_LINK: false,
     MULTI_BOT_TOKENS: [] as string[]
   }

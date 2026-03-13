@@ -121,6 +121,8 @@ STREAM_USE_SESSION_FILE = result.get('STREAM_USE_SESSION_FILE', False)
 STREAM_ALLOWED_USERS = result.get('STREAM_ALLOWED_USERS', '')
 # 是否自动将直链添加到aria2下载（默认启用）
 STREAM_AUTO_DOWNLOAD = result.get('STREAM_AUTO_DOWNLOAD', True)
+# 是否只使用 TG 网盘（默认关闭，开启后仅转发到频道，不走 aria2 下载/上传）
+STREAM_TG_DISK_ONLY = result.get('STREAM_TG_DISK_ONLY', False)
 # 是否发送直链信息给用户（默认不启用，设置为 True 后才会发送直链信息给用户，关闭后仍会生成直链并添加到下载队列）
 SEND_STREAM_LINK = result.get('SEND_STREAM_LINK', False)
 # 是否跳过小于指定大小的媒体文件（默认False）

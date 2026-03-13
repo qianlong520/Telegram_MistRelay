@@ -24,6 +24,20 @@ media_group_cache = defaultdict(list)
 media_group_tasks = {}
 
 
+def get_stream_runtime_flags():
+    """动态读取直链处理相关配置，避免必须重启服务。"""
+    from configer import get_config_value
+
+    tg_disk_only = get_config_value('STREAM_TG_DISK_ONLY', False)
+    auto_download = get_config_value('STREAM_AUTO_DOWNLOAD', True)
+    send_stream_link = get_config_value('SEND_STREAM_LINK', False)
+    return {
+        'tg_disk_only': tg_disk_only,
+        'auto_download': auto_download and not tg_disk_only,
+        'send_stream_link': send_stream_link,
+    }
+
+
 async def process_media_group(messages: list, queue_reply_msg=None):
     """
     处理媒体组：一次性转发所有媒体文件到频道，保持消息完整性
@@ -34,6 +48,10 @@ async def process_media_group(messages: list, queue_reply_msg=None):
     """
     # 延迟导入避免循环依赖
     from .utils import aria2_client, should_download_file
+    runtime_flags = get_stream_runtime_flags()
+    tg_disk_only = runtime_flags['tg_disk_only']
+    auto_download_enabled = runtime_flags['auto_download']
+    send_stream_link = runtime_flags['send_stream_link']
     
     if not messages:
         return
@@ -114,12 +132,13 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                         logger.error(f"记录频道媒体到数据库失败: {db_e}", exc_info=True)
 
                 should_download = should_download_file(original_msg)
+                should_enqueue_download = should_download and not tg_disk_only
                 
                 link_entry = {
                     'name': file_name,
                     'full_link': stream_link,
                     'short_link': short_link,
-                    'should_download': should_download,
+                    'should_download': should_enqueue_download,
                     'original_msg': original_msg,
                     'log_msg': log_msg,
                     'log_media': log_media,
@@ -128,9 +147,11 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 stream_links.append(link_entry)
                 
                 # 检查是否应该下载（图片类不下载）
-                if should_download:
+                if should_enqueue_download:
                     download_entries.append(link_entry)
                     logger.info(f"直链已生成（将下载）： {stream_link} for {first_msg.from_user.first_name}")
+                elif tg_disk_only:
+                    logger.info(f"文件已直转TG网盘： {stream_link} for {first_msg.from_user.first_name}")
                 else:
                     logger.info(f"直链已生成（仅转发）： {stream_link} for {first_msg.from_user.first_name}")
                     
@@ -141,7 +162,12 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         if len(stream_links) == 1:
             # 单个文件
             link_info = stream_links[0]
-            download_status = "（将下载）" if link_info['should_download'] else "（仅转发）"
+            if link_info['should_download']:
+                download_status = "（将下载）"
+            elif tg_disk_only:
+                download_status = "（仅转发到TG网盘）"
+            else:
+                download_status = "（仅转发）"
             reply_text = (
                 f"🔗 <b>直链已准备好{download_status}</b>\n\n"
                 f"📁 <b>文件:</b> <code>{link_info['name']}</code>\n\n"
@@ -160,14 +186,23 @@ async def process_media_group(messages: list, queue_reply_msg=None):
             )
             if download_count > 0:
                 reply_text += f"  • ⬇️ 将下载: {download_count}\n"
-            if skip_count > 0:
+            if skip_count > 0 and tg_disk_only:
+                reply_text += f"  • 📦 已转入TG网盘: {skip_count}\n"
+            elif skip_count > 0:
                 reply_text += f"  • 📷 仅转发: {skip_count}\n"
             reply_text += "\n📋 <b>文件列表:</b>\n\n"
             
             for i, link_info in enumerate(stream_links, 1):
                 is_download = link_info['should_download']
-                status_icon = "⬇️" if is_download else "📷"
-                status_text = "将下载" if is_download else "仅转发"
+                if is_download:
+                    status_icon = "⬇️"
+                    status_text = "将下载"
+                elif tg_disk_only:
+                    status_icon = "📦"
+                    status_text = "仅转发到TG网盘"
+                else:
+                    status_icon = "📷"
+                    status_text = "仅转发"
                 reply_text += (
                     f"{status_icon} <b>{i}. {link_info['name']}</b>\n"
                     f"   <code>{link_info['full_link']}</code>\n"
@@ -185,7 +220,7 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         
         # 自动添加到aria2下载队列（如果启用且是管理员）
         task_gids = []  # 记录添加的下载任务GID
-        if Var.AUTO_DOWNLOAD and aria2_client and is_admin and download_entries:
+        if auto_download_enabled and aria2_client and is_admin and download_entries:
             try:
                 # 批量添加下载任务，智能等待避免并发过高
                 success_count = 0
@@ -387,7 +422,7 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         
         # 回复用户（只回复第一条消息）- 如果启用了发送直链信息
         reply_msg = None
-        if Var.SEND_STREAM_LINK:
+        if send_stream_link:
             try:
                 buttons = []
                 if main_link:
@@ -455,13 +490,17 @@ async def process_single_media(m: Message, queue_reply_msg=None):
     """
     # 延迟导入避免循环依赖
     from .utils import aria2_client, should_download_file
+    runtime_flags = get_stream_runtime_flags()
+    tg_disk_only = runtime_flags['tg_disk_only']
+    auto_download_enabled = runtime_flags['auto_download']
+    send_stream_link = runtime_flags['send_stream_link']
     
     if not Var.ENABLE_STREAM:
         return
     
     # 如果有排队通知，且启用了发送直链信息，则删除它（因为我们要发送实际的处理结果）
     # 如果没有启用发送直链信息，保留队列通知消息，以便后续更新为完成状态
-    if queue_reply_msg and Var.SEND_STREAM_LINK:
+    if queue_reply_msg and send_stream_link:
         try:
             await queue_reply_msg.delete()
         except Exception as e:
@@ -496,13 +535,19 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         
         # 检查是否应该下载
         should_download = should_download_file(m)
-        download_status = "（将下载）" if should_download else "（仅转发）"
+        should_enqueue_download = should_download and not tg_disk_only
+        if should_enqueue_download:
+            download_status = "（将下载）"
+        elif tg_disk_only:
+            download_status = "（仅转发到TG网盘）"
+        else:
+            download_status = "（仅转发）"
         logger.info(f"直链已生成{download_status}： {stream_link} for {m.from_user.first_name}")
         
         # 后续处理：自动将直链添加到aria2下载队列（如果启用且是管理员，且文件类型需要下载）
         download_added = False
         task_gid = None  # 记录任务GID
-        if Var.AUTO_DOWNLOAD and aria2_client and should_download:
+        if auto_download_enabled and aria2_client and should_enqueue_download:
             # 检查是否是管理员
             is_admin = False
             if Var.ADMIN_ID:
@@ -568,7 +613,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     logger.error(f"添加直链到aria2失败: {e}", exc_info=True)
         
         # 返回直链给用户（如果启用了发送直链信息）
-        if Var.SEND_STREAM_LINK:
+        if send_stream_link:
             file_name = ""
             if m.document:
                 file_name = m.document.file_name or "未知文件"
@@ -592,7 +637,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
             
             if download_added:
                 reply_text += "\n\n✅ <b>已自动添加到下载队列</b>"
-            elif Var.AUTO_DOWNLOAD and aria2_client and should_download:
+            elif auto_download_enabled and aria2_client and should_enqueue_download:
                 reply_text += "\n\n⚠️ <b>添加到下载队列失败，请手动添加</b>"
             
             try:

@@ -1077,6 +1077,7 @@ def init_config_from_yaml():
             'STREAM_USE_SESSION_FILE': ('bool', 'stream', '是否使用会话文件'),
             'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的用户列表'),
             'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '是否自动添加到下载队列'),
+            'STREAM_TG_DISK_ONLY': ('bool', 'stream', '是否只使用TG网盘直转频道'),
             'SEND_STREAM_LINK': ('bool', 'stream', '是否发送直链信息给用户'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
         }

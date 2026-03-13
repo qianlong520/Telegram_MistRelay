@@ -62,6 +62,15 @@
 
       <div class="drive-topbar">
         <div class="drive-controls">
+          <el-button
+            class="drive-nav-button"
+            :icon="ArrowLeft"
+            :disabled="!canNavigateUp"
+            @click="navigateUp"
+          >
+            返回上级
+          </el-button>
+
           <div class="drive-breadcrumb-card">
             <el-breadcrumb separator="/">
               <el-breadcrumb-item @click="navigateToPath('/')">
@@ -298,7 +307,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { HomeFilled, Document, Folder, Search, List, Grid, Picture, VideoPlay, Sort, Download, Delete, RefreshRight } from '@element-plus/icons-vue'
+import { HomeFilled, Document, Folder, Search, List, Grid, Picture, VideoPlay, Sort, Download, Delete, RefreshRight, ArrowLeft } from '@element-plus/icons-vue'
 import { getRcloneRemotes, browseDrive, getThumbnail, deleteFile, getDriveUsage, type RcloneRemote, type DriveItem, type DriveUsageResponse } from '@/api'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import { buildAuthorizedApiUrl } from '@/utils/runtime'
@@ -375,6 +384,17 @@ const pathSegments = computed(() => {
   if (path === '/') return []
   return path.split('/').filter(Boolean)
 })
+
+const parentPath = computed(() => {
+  const path = currentPath.value || '/'
+  if (path === '/') return null
+
+  const segments = path.split('/').filter(Boolean)
+  if (segments.length <= 1) return '/'
+  return `/${segments.slice(0, -1).join('/')}`
+})
+
+const canNavigateUp = computed(() => parentPath.value !== null)
 
 const filteredItems = computed(() => {
   let result = items.value.slice()
@@ -776,6 +796,11 @@ function navigateToPath(path: string) {
   browse()
 }
 
+function navigateUp() {
+  if (!parentPath.value) return
+  navigateToPath(parentPath.value)
+}
+
 // 导航到面包屑某一段
 function navigateToSegment(index: number) {
   const segments = pathSegments.value.slice(0, index + 1)
@@ -914,6 +939,10 @@ watch(paginatedItems, () => {
 .drive-breadcrumb-card {
   flex: 1;
   min-width: 240px;
+}
+
+.drive-nav-button {
+  flex: 0 0 auto;
 }
 
 .drive-actions {
